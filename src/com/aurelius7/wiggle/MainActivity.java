@@ -154,7 +154,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     private boolean viewerTilt;
     private int viewerPos;
     private volatile boolean rollBusy;
-    private boolean front, screenLightOn;
+    private boolean front, screenLightOn, mirrorSelfie;
     private W.ScreenLight screenLight;
     private W.IconBtn flipBtn;
 
@@ -217,6 +217,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         rollMode = prefs.getBoolean("roll", false);
         borderOn = prefs.getBoolean("border", false);
         front = prefs.getBoolean("front", false);
+        mirrorSelfie = prefs.getBoolean("mirrorSelfie", false);
     }
 
     private void put(String k, int v) { prefs.edit().putInt(k, v).apply(); }
@@ -316,7 +317,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
             final float[] fh = hit;
             ui.post(new Runnable() { @Override public void run() {
                 if (fh != null && state == ST_PREVIEW && SystemClock.uptimeMillis() - lastManualAim >= 5000) {
-                    float fx = front ? 1f - fh[0] : fh[0];
+                    float fx = mirrored() ? 1f - fh[0] : fh[0];
                     float u = 0.5f + (fx - 0.5f) * scaleX, v = 0.5f + (fh[1] - 0.5f) * scaleY;
                     brackets.u = Math.max(0.12f, Math.min(0.88f, u));
                     brackets.v = Math.max(0.16f, Math.min(0.78f, v));
@@ -975,7 +976,12 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         W.Toggle fac = new W.Toggle(this, autoFaces);
         fac.setContentDescription("Auto-aim on faces");
         fac.listener = new W.Toggle.OnToggle() { @Override public void onToggle(boolean on) { autoFaces = on; put("autoFaces", on); scheduleFaceAim(); } };
-        setRow(g, "Auto-aim on faces", "Brackets jump to the nearest face", fac, true);
+        setRow(g, "Auto-aim on faces", "Brackets jump to the nearest face", fac, false);
+        W.Toggle mir = new W.Toggle(this, mirrorSelfie);
+        mir.setContentDescription("Mirror selfies");
+        mir.listener = new W.Toggle.OnToggle() { @Override public void onToggle(boolean on) {
+            mirrorSelfie = on; put("mirrorSelfie", on); applyTransform(); } };
+        setRow(g, "Mirror selfies", "Off = true view, like others see you", mir, true);
 
         g = group(s, "FLASH");
         W.Segmented fls = new W.Segmented(this, FLASH_NAMES, flashIdx, false);
@@ -1156,7 +1162,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         if (va < contentAspect) { scaleX = (vh * contentAspect) / vw; scaleY = 1; }
         else { scaleX = 1; scaleY = (vw / contentAspect) / vh; }
         Matrix m = new Matrix();
-        m.setScale(front ? -scaleX : scaleX, scaleY, vw / 2f, vh / 2f);
+        m.setScale(mirrored() ? -scaleX : scaleX, scaleY, vw / 2f, vh / 2f);
         texture.setTransform(m);
     }
 
@@ -1170,6 +1176,9 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     @Override public void onSurfaceTextureUpdated(SurfaceTexture s) {}
 
     // ================================================================= selfie camera
+    /** True view by default; mirror only if the user turned on "Mirror selfies". */
+    private boolean mirrored() { return front && mirrorSelfie; }
+
     private void flipCamera() {
         if (state != ST_PREVIEW) return;
         front = !front;
@@ -1228,7 +1237,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         state = ST_CAPTURE;
         float[] fc = focusContent();
         shotU = fc[0]; shotV = fc[1];
-        float[] fs = contentToSensor(front ? 1f - shotU : shotU, shotV);
+        float[] fs = contentToSensor(mirrored() ? 1f - shotU : shotU, shotV);
         recorder = new SweepRecorder(cam.W, cam.H, fs[0], fs[1], DEPTH_FACTORS[depthIdx], orbit, this);
         boolean wantLight = flashIdx == 2 || (flashIdx == 1 && sceneIsDark());
         torchOn = !front && cam.hasFlash && wantLight;
@@ -1299,7 +1308,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
             final float targetAspect = ASPECTS[aspectIdx];
             final int stock = liveStock, gr = defaultGrain(liveStock);
             final boolean stamp = dateStamp;
-            final boolean mirror = front;
+            final boolean mirror = mirrored();
             if (rollMode) { exposeToRoll(r, orient, u, v, targetAspect, stock, mirror); return; }
             new Thread(new Runnable() { @Override public void run() {
                 String err = null; Composer comp = null; Bitmap[] base = null, dev = null;
