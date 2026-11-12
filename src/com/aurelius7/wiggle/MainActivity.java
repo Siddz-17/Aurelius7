@@ -5,6 +5,8 @@ import android.app.Activity;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Matrix;
@@ -42,7 +44,8 @@ import java.util.Locale;
 public class MainActivity extends Activity implements TextureView.SurfaceTextureListener,
         CameraRig.Callback, SweepRecorder.Listener, SensorEventListener {
 
-    private static final String VERSION = "v0.2";
+    private String VERSION = "v?";
+    private int versionCode;
     private static final int ST_PREVIEW = 0, ST_CAPTURE = 1, ST_PROCESS = 2, ST_RESULT = 3;
     private static final int[] SEQ_BOUNCE = {0, 1, 2, 3, 2, 1}, SEQ_FWD = {0, 1, 2, 3};
     private static final String[] DEPTH_NAMES = {"LO", "MID", "HI"};
@@ -58,7 +61,9 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     private TextureView texture;
     private Ui.FocusOverlay focus;
     private Ui.LevelView level;
-    private Ui.BrutalButton hintChip, shutter, depthBtn;
+    private Ui.BrutalButton hintChip, shutter, depthBtn, updateBtn;
+    private Updater.Info pendingUpdate;
+    private volatile boolean updating;
     private Ui.ThumbView thumb;
     private Ui.SweepHud hud;
     // result layer
@@ -94,12 +99,18 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         Ui.loadFonts(this);
+        try {
+            PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
+            VERSION = "v" + pi.versionName; versionCode = pi.versionCode;
+        } catch (Exception ignored) {}
         Window w = getWindow();
         w.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         w.setNavigationBarColor(Ui.BLACK);
         setContentView(buildUi());
         sensors = (SensorManager) getSystemService(SENSOR_SERVICE);
         setPreviewState();
+        checkForUpdate();
+        handleInstallIntent(getIntent());
     }
 
     private int dp(float v) { return Ui.dp(this, v); }
@@ -146,6 +157,13 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         vlp.leftMargin = dp(8);
         top.addView(ver, vlp);
         camLayer.addView(top, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP));
+
+        updateBtn = chip("", Ui.BLACK, Ui.YELLOW, 13, false);
+        updateBtn.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { startUpdate(); } });
+        updateBtn.setVisibility(View.GONE);
+        FrameLayout.LayoutParams ulp = new FrameLayout.LayoutParams(-2, dp(46), Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        ulp.topMargin = dp(74);
+        camLayer.addView(updateBtn, ulp);
 
         // bottom bar: black rule + yellow bar
         LinearLayout bottom = new LinearLayout(this);
@@ -604,6 +622,74 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     @Override public void onBackPressed() {
         if (state == ST_RESULT) { retake(); return; }
         super.onBackPressed();
+    }
+
+    // ================================================================== self-update
+    private void checkForUpdate() {
+        new Thread(new Runnable() { @Override public void run() {
+            final Updater.Info info = Updater.check(versionCode);
+            if (info == null) return;
+            runOnUiThread(new Runnable() { @Override public void run() {
+                pendingUpdate = info;
+                updateBtn.setText("▲ UPDATE → v" + info.name);
+                updateBtn.requestLayout();
+                updateBtn.setVisibility(View.VISIBLE);
+            }});
+        }}, "aurelius-update-check").start();
+    }
+
+    private void startUpdate() {
+        if (pendingUpdate == null || updating) return;
+        updating = true;
+        updateBtn.setEnabled(false);
+        updateBtn.setText("DOWNLOADING 0%");
+        final Updater.Info info = pendingUpdate;
+        new Thread(new Runnable() { @Override public void run() {
+            String err = null;
+            try {
+                Updater.install(MainActivity.this, info, new Updater.Progress() {
+                    @Override public void onProgress(final int pct) {
+                        runOnUiThread(new Runnable() { @Override public void run() {
+                            updateBtn.setText("DOWNLOADING " + pct + "%"); updateBtn.requestLayout(); }});
+                    }
+                });
+            } catch (Exception e) {
+                err = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+            }
+            final String fe = err;
+            runOnUiThread(new Runnable() { @Override public void run() {
+                if (fe != null) {
+                    updating = false;
+                    updateBtn.setEnabled(true);
+                    updateBtn.setText("✕ RETRY UPDATE");
+                } else {
+                    updateBtn.setText("INSTALLING…");
+                }
+                updateBtn.requestLayout();
+            }});
+        }}, "aurelius-update").start();
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        handleInstallIntent(intent);
+    }
+
+    private void handleInstallIntent(Intent intent) {
+        if (intent == null || !Updater.ACTION_STATUS.equals(intent.getAction())) return;
+        int status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, -999);
+        if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
+            Intent confirm = (Intent) intent.getParcelableExtra(Intent.EXTRA_INTENT);
+            if (confirm != null) {
+                confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                try { startActivity(confirm); } catch (Exception ignored) {}
+            }
+        } else if (status != PackageInstaller.STATUS_SUCCESS) {
+            updating = false;
+            updateBtn.setEnabled(true);
+            updateBtn.setText("✕ INSTALL CANCELLED · RETRY");
+            updateBtn.requestLayout();
+        }
     }
 
     // ================================================================== save / share

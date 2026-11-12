@@ -31,3 +31,12 @@ If it's missing, `build.sh` generates a new one (fresh installs only).
 - `Composer.java`: refocusable alignment + cropping
 - `GifEncoder.java` / `Mp4Encoder.java`: exporters
 - `Ui.java`: brutalist widget kit · `MainActivity.java`: screens
+
+## Releases & auto-update
+Pushing to `main` with a bumped `versionCode` runs `.github/workflows/release.yml`: GitHub Actions builds,
+signs and publishes the APK + `latest.json` to the public
+[`aurelius7-releases`](https://github.com/Siddz-17/aurelius7-releases) repo. The app checks that file on launch
+and shows an **UPDATE** banner; one tap downloads and opens Android's installer.
+
+Required repo secrets: `KEYSTORE_B64` (base64 of `aurelius7.keystore`) and `RELEASES_TOKEN`
+(fine-grained PAT with *Contents: read & write* on `aurelius7-releases`).
