@@ -21,7 +21,7 @@ public class SweepRecorder implements CameraRig.FrameSink {
     public static final int COACH_NONE = 0, COACH_TURNING = 1, COACH_FAST = 2, COACH_EDGE = 3;
 
     public static class Frame {
-        byte[] y, u, v, thumb;
+        byte[] y, u, v, thumb, thumb8;
         float px, py;        // parallax so far (full-res px)
         float sfx, sfy;      // subject position (full-res px)
         long t;
@@ -31,8 +31,12 @@ public class SweepRecorder implements CameraRig.FrameSink {
     public final float target;
     public final ArrayList<Frame> frames = new ArrayList<Frame>();
     private final Listener listener;
-    private static final int MAX_FRAMES = 70;
-    private static final long MAX_MS = 2600, MIN_MS = 350;
+    private final int maxFrames;
+    private final long maxMs;
+    private static final long MIN_MS = 350;
+    private final boolean orbit;
+    private float vgX, vgY, vsX, vsY; // last per-frame motion (quarter-res px), used as prediction
+    public int lostFrames;
 
     private float subjX, subjY, subj0X, subj0Y; // thumb coords
     private float gX, gY;                        // cumulative background shift, thumb px
@@ -43,7 +47,10 @@ public class SweepRecorder implements CameraRig.FrameSink {
     private volatile boolean finishRequested;
     public void finishNow() { finishRequested = true; }
 
-    public SweepRecorder(int w, int h, float focusX, float focusY, float targetFactor, Listener l) {
+    public SweepRecorder(int w, int h, float focusX, float focusY, float targetFactor, boolean orbit, Listener l) {
+        this.orbit = orbit;
+        maxFrames = orbit ? 84 : 70;
+        maxMs = orbit ? 3400 : 2600;
         W = w; H = h; TW = w / 4; TH = h / 4;
         listener = l;
         target = targetFactor * Math.max(w, h); // 0.02 -> ~26px at 1280: a pleasant wiggle without tearing
@@ -67,6 +74,7 @@ public class SweepRecorder implements CameraRig.FrameSink {
         copyPlane(p[1], W / 2, H / 2, f.u);
         copyPlane(p[2], W / 2, H / 2, f.v);
         f.thumb = Track.down4(f.y, W, H);
+        f.thumb8 = Track.down2(f.thumb, TW, TH);
         long now = SystemClock.uptimeMillis();
         f.t = now;
 
@@ -76,13 +84,20 @@ public class SweepRecorder implements CameraRig.FrameSink {
         } else {
             Frame prev = frames.get(frames.size() - 1);
             int sx = Math.round(subjX), sy = Math.round(subjY);
-            float[] s = Track.shift(prev.thumb, f.thumb, TW, TH, sx - 12, sy - 12, sx + 12, sy + 12, 1, 6, 0, 0, 0, 0);
-            float[] g = Track.shift(prev.thumb, f.thumb, TW, TH, 8, 8, TW - 8, TH - 8, 2, 6,
-                    sx - 24, sy - 24, sx + 24, sy + 24);
+            // background: whole frame minus the subject box, predicted from last motion
+            float[] g = Track.track(prev.thumb, f.thumb, prev.thumb8, f.thumb8, TW, TH, vgX, vgY,
+                    8, 8, TW - 8, TH - 8, 2, sx - 24, sy - 24, sx + 24, sy + 24);
+            // subject patch
+            float[] s = Track.track(prev.thumb, f.thumb, prev.thumb8, f.thumb8, TW, TH, vsX, vsY,
+                    sx - 14, sy - 14, sx + 14, sy + 14, 1, 0, 0, 0, 0);
+            boolean gOk = g[2] < 16f, sOk = s[2] < 16f;
+            if (!gOk) { g[0] = vgX; g[1] = vgY; }
+            if (!sOk) { s[0] = vsX; s[1] = vsY; lostFrames++; }
+            vgX = g[0]; vgY = g[1]; vsX = s[0]; vsY = s[1];
             subjX += s[0]; subjY += s[1];
             gX += g[0]; gY += g[1];
             float stepPx = (float) Math.hypot(g[0], g[1]) * 4f;
-            if (stepPx > 28) coach = COACH_FAST;
+            if (stepPx > (orbit ? 90 : 40)) coach = COACH_FAST;
         }
         f.px = ((subjX - subj0X) - gX) * 4f;
         f.py = ((subjY - subj0Y) - gY) * 4f;
@@ -93,14 +108,14 @@ public class SweepRecorder implements CameraRig.FrameSink {
         long el = now - t0;
         float par = (float) Math.hypot(f.px, f.py);
         float glob = (float) Math.hypot(gX, gY) * 4f;
-        if (coach == COACH_NONE && el > 500 && glob > 80 && par < 0.25f * glob) coach = COACH_TURNING;
+        if (coach == COACH_NONE && el > (orbit ? 900 : 500) && glob > 80 && par < (orbit ? 0.08f : 0.25f) * glob) coach = COACH_TURNING;
         boolean edge = subjX < 16 || subjX > TW - 17 || subjY < 16 || subjY > TH - 17;
         if (edge) coach = COACH_EDGE;
 
         float prog = Math.min(1f, par / target);
-        listener.onSweepProgress(Math.max(prog, Math.min(0.15f, el / (float) MAX_MS)), coach, par);
+        listener.onSweepProgress(Math.max(prog, Math.min(0.15f, el / (float) maxMs)), coach, par);
 
-        if ((finishRequested && frames.size() >= 4) || (par >= target && el > MIN_MS) || el > MAX_MS || frames.size() >= MAX_FRAMES || (edge && frames.size() >= 4)) {
+        if ((finishRequested && frames.size() >= 4) || (par >= target && el > MIN_MS) || el > maxMs || frames.size() >= maxFrames || (edge && frames.size() >= 4)) {
             done = true;
             lowDepth = par < target * 0.35f;
             listener.onSweepDone(this);

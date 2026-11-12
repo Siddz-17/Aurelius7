@@ -967,7 +967,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         float[] fc = focusContent();
         shotU = fc[0]; shotV = fc[1];
         float[] fs = contentToSensor(shotU, shotV);
-        recorder = new SweepRecorder(cam.W, cam.H, fs[0], fs[1], DEPTH_FACTORS[depthIdx], this);
+        recorder = new SweepRecorder(cam.W, cam.H, fs[0], fs[1], DEPTH_FACTORS[depthIdx], orbit, this);
         torchOn = cam.hasFlash && (flashIdx == 2 || (flashIdx == 1 && sceneIsDark()));
         brackets.setEnabled(false);
         dial.setEnabled(false);
