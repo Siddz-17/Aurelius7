@@ -111,6 +111,14 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         setPreviewState();
         checkForUpdate();
         handleInstallIntent(getIntent());
+        try {
+            android.content.SharedPreferences sp = getSharedPreferences("aurelius7", MODE_PRIVATE);
+            int seen = sp.getInt("seenVersion", 0);
+            if (seen != 0 && seen < versionCode) {
+                ui.postDelayed(new Runnable() { @Override public void run() { showStamp("UPDATED → " + VERSION); } }, 600);
+            }
+            sp.edit().putInt("seenVersion", versionCode).apply();
+        } catch (Exception ignored) {}
     }
 
     private int dp(float v) { return Ui.dp(this, v); }
