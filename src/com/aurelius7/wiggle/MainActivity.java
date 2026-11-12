@@ -154,6 +154,9 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     private boolean viewerTilt;
     private int viewerPos;
     private volatile boolean rollBusy;
+    private boolean front, screenLightOn;
+    private W.ScreenLight screenLight;
+    private W.IconBtn flipBtn;
 
     // ================================================================= setup
     @Override protected void onCreate(Bundle b) {
@@ -183,6 +186,9 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         viewerScreen = buildViewer();
         View[] all = {cameraScreen, resultScreen, galleryScreen, settingsScreen, welcomeScreen, viewerScreen};
         for (View v : all) { v.setVisibility(View.GONE); root.addView(v, new FrameLayout.LayoutParams(-1, -1)); }
+        screenLight = new W.ScreenLight(this);
+        screenLight.setVisibility(View.GONE);
+        root.addView(screenLight, new FrameLayout.LayoutParams(-1, -1));
         setContentView(root);
 
         applyLiveStock();
@@ -210,6 +216,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         autoFaces = prefs.getBoolean("autoFaces", true);
         rollMode = prefs.getBoolean("roll", false);
         borderOn = prefs.getBoolean("border", false);
+        front = prefs.getBoolean("front", false);
     }
 
     private void put(String k, int v) { prefs.edit().putInt(k, v).apply(); }
@@ -309,7 +316,8 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
             final float[] fh = hit;
             ui.post(new Runnable() { @Override public void run() {
                 if (fh != null && state == ST_PREVIEW && SystemClock.uptimeMillis() - lastManualAim >= 5000) {
-                    float u = 0.5f + (fh[0] - 0.5f) * scaleX, v = 0.5f + (fh[1] - 0.5f) * scaleY;
+                    float fx = front ? 1f - fh[0] : fh[0];
+                    float u = 0.5f + (fx - 0.5f) * scaleX, v = 0.5f + (fh[1] - 0.5f) * scaleY;
                     brackets.u = Math.max(0.12f, Math.min(0.88f, u));
                     brackets.v = Math.max(0.16f, Math.min(0.78f, v));
                     brackets.invalidate();
@@ -472,9 +480,9 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         flashPill = pill("OFF", W.IC_FLASH, W.Pill.GLASS_STYLE, 13, false);
         flashPill.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
             if (state != ST_PREVIEW) return;
-            if (cam != null && cameraStarted && !cam.hasFlash) { flashInfo("No flash on this camera"); return; }
+            if (cam != null && cameraStarted && !cam.hasFlash && !front) { flashInfo("No flash on this camera"); return; }
             flashIdx = (flashIdx + 1) % 3; put("flash", flashIdx); updateFlashPill();
-            if (flashIdx == 2) flashInfo("Light stays on during the sweep");
+            if (flashIdx == 2) flashInfo(front ? "Screen lights your face during the sweep" : "Light stays on during the sweep");
             else if (flashIdx == 1) flashInfo("Light turns on when it's dark");
         }});
         top.addView(flashPill);
@@ -484,6 +492,10 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         LinearLayout.LayoutParams elp = lp(-2, -2); elp.leftMargin = dp(8);
         top.addView(expPill, elp);
         top.addView(spacer());
+        flipBtn = new W.IconBtn(this, W.IC_FLIP, "Switch camera");
+        flipBtn.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { flipCamera(); } });
+        LinearLayout.LayoutParams fbl = lp(dp(44), dp(44)); fbl.rightMargin = dp(8);
+        top.addView(flipBtn, fbl);
         W.IconBtn gear = new W.IconBtn(this, W.IC_GEAR, "Settings");
         gear.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (state == ST_PREVIEW) show(settingsScreen); } });
         top.addView(gear, lp(dp(44), dp(44)));
@@ -1110,6 +1122,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         }
         if (cam != null) { cam.stop(); cam = null; }
         torchOn = false;
+        screenLight(false);
         cameraStarted = false;
         super.onPause();
     }
@@ -1122,7 +1135,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     private void maybeStartCamera() {
         if (!resumed || !surfaceReady || cam != null) return;
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) return;
-        cam = new CameraRig(this, texture, this);
+        cam = new CameraRig(this, texture, this, front);
         cam.start();
     }
 
@@ -1143,7 +1156,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         if (va < contentAspect) { scaleX = (vh * contentAspect) / vw; scaleY = 1; }
         else { scaleX = 1; scaleY = (vw / contentAspect) / vh; }
         Matrix m = new Matrix();
-        m.setScale(scaleX, scaleY, vw / 2f, vh / 2f);
+        m.setScale(front ? -scaleX : scaleX, scaleY, vw / 2f, vh / 2f);
         texture.setTransform(m);
     }
 
@@ -1155,6 +1168,30 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     @Override public void onSurfaceTextureSizeChanged(SurfaceTexture s, int w, int h) { applyTransform(); }
     @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture s) { surfaceReady = false; return true; }
     @Override public void onSurfaceTextureUpdated(SurfaceTexture s) {}
+
+    // ================================================================= selfie camera
+    private void flipCamera() {
+        if (state != ST_PREVIEW) return;
+        front = !front;
+        put("front", front);
+        if (cam != null) { cam.stop(); cam = null; }
+        cameraStarted = false;
+        shutter.setEnabled(false);
+        brackets.u = 0.5f; brackets.v = 0.42f; brackets.invalidate();
+        lastManualAim = 0;
+        flipBtn.animate().rotationBy(180).setDuration(250).start();
+        flashInfo(front ? "Selfie \u00B7 arc the phone around your face" : "Back camera");
+        maybeStartCamera();
+    }
+
+    private void screenLight(boolean on) {
+        if (screenLightOn == on) return;
+        screenLightOn = on;
+        screenLight.setVisibility(on ? View.VISIBLE : View.GONE);
+        WindowManager.LayoutParams a = getWindow().getAttributes();
+        a.screenBrightness = on ? 1f : WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
+        getWindow().setAttributes(a);
+    }
 
     // ================================================================= capture
     private float[] focusContent() {
@@ -1191,14 +1228,16 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         state = ST_CAPTURE;
         float[] fc = focusContent();
         shotU = fc[0]; shotV = fc[1];
-        float[] fs = contentToSensor(shotU, shotV);
+        float[] fs = contentToSensor(front ? 1f - shotU : shotU, shotV);
         recorder = new SweepRecorder(cam.W, cam.H, fs[0], fs[1], DEPTH_FACTORS[depthIdx], orbit, this);
-        torchOn = cam.hasFlash && (flashIdx == 2 || (flashIdx == 1 && sceneIsDark()));
+        boolean wantLight = flashIdx == 2 || (flashIdx == 1 && sceneIsDark());
+        torchOn = !front && cam.hasFlash && wantLight;
+        if (front && wantLight) screenLight(true);
         brackets.setEnabled(false);
         dial.setEnabled(false);
         camStockRow.setVisibility(View.GONE);
         shutter.setState(W.Shutter.REC_STATE);
-        if (torchOn) { flashPill.setText("LIGHT"); flashPill.setSel(true); }
+        if (torchOn || screenLightOn) { flashPill.setText("LIGHT"); flashPill.setSel(true); }
         lastLens = 1;
         hud.set(0, orbit ? "Keep curving →" : "Keep sliding →", false, orbit);
         hud.setVisibility(View.VISIBLE);
@@ -1211,10 +1250,10 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         if (torchOn) cam.setTorch(true);
         ui.postDelayed(new Runnable() { @Override public void run() {
             if (state == ST_CAPTURE && recorder == r && cam != null) cam.lock();
-        }}, torchOn ? 420 : 0);
+        }}, (torchOn || screenLightOn) ? 420 : 0);
         ui.postDelayed(new Runnable() { @Override public void run() {
             if (state == ST_CAPTURE && recorder == r && cam != null) cam.sink = r;
-        }}, torchOn ? 600 : 180);
+        }}, (torchOn || screenLightOn) ? 600 : 180);
     }
 
     private final Runnable timerTick = new Runnable() { @Override public void run() {
@@ -1249,6 +1288,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
             if (state != ST_CAPTURE || recorder != r) return;
             if (cam != null) { cam.unlock(); if (torchOn) cam.setTorch(false); }
             torchOn = false;
+            screenLight(false);
             buzz(45);
             stopTimer();
             state = ST_PROCESS;
@@ -1259,12 +1299,13 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
             final float targetAspect = ASPECTS[aspectIdx];
             final int stock = liveStock, gr = defaultGrain(liveStock);
             final boolean stamp = dateStamp;
-            if (rollMode) { exposeToRoll(r, orient, u, v, targetAspect, stock); return; }
+            final boolean mirror = front;
+            if (rollMode) { exposeToRoll(r, orient, u, v, targetAspect, stock, mirror); return; }
             new Thread(new Runnable() { @Override public void run() {
                 String err = null; Composer comp = null; Bitmap[] base = null, dev = null;
                 boolean low = r.lowDepth;
                 try {
-                    WiggleBuilder.Result res = WiggleBuilder.build(r, orient, 720);
+                    WiggleBuilder.Result res = WiggleBuilder.build(r, orient, 720, mirror);
                     if (res.error != null) err = res.error;
                     else {
                         comp = new Composer(res.frames, res.seeds);
@@ -1310,11 +1351,11 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     private void showTiltFrameForce() { tiltIdx = -1; showTiltFrame(); }
 
     // ================================================================= roll of 24
-    private void exposeToRoll(final SweepRecorder r, final int orient, final float u, final float v, final float aspect, final int stock) {
+    private void exposeToRoll(final SweepRecorder r, final int orient, final float u, final float v, final float aspect, final int stock, final boolean mirror) {
         new Thread(new Runnable() { @Override public void run() {
             String err = null;
             try {
-                WiggleBuilder.Result res = WiggleBuilder.build(r, orient, 720);
+                WiggleBuilder.Result res = WiggleBuilder.build(r, orient, 720, mirror);
                 if (res.error != null) err = res.error;
                 else {
                     Composer comp = new Composer(res.frames, res.seeds);

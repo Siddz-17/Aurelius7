@@ -20,7 +20,7 @@ public final class WiggleBuilder {
         public String error;
     }
 
-    public static Result build(SweepRecorder rec, int sensorOrientation, int outWidth) {
+    public static Result build(SweepRecorder rec, int sensorOrientation, int outWidth, boolean mirror) {
         Result res = new Result();
         ArrayList<SweepRecorder.Frame> fr = rec.frames;
         int n = fr.size();
@@ -95,7 +95,7 @@ public final class WiggleBuilder {
             Bitmap raw = Bitmap.createBitmap(px, W, H, Bitmap.Config.ARGB_8888);
             Matrix m = new Matrix();
             m.postRotate(sensorOrientation);
-            m.postScale(scale, scale);
+            m.postScale(mirror ? -scale : scale, scale);
             Bitmap up = Bitmap.createBitmap(raw, 0, 0, W, H, m, true);
             if (up != raw) raw.recycle();
             res.frames[k] = up;
@@ -108,7 +108,7 @@ public final class WiggleBuilder {
                 case 180: ux = -dx; uy = -dy; break;
                 default:  ux = dx;  uy = dy;
             }
-            res.seeds[k][0] = ux * scale;
+            res.seeds[k][0] = (mirror ? -ux : ux) * scale;
             res.seeds[k][1] = uy * scale;
         }
         SweepRecorder.Frame f3 = fr.get(pick[3]);

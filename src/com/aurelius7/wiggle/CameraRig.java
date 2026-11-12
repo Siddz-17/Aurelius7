@@ -46,8 +46,10 @@ public class CameraRig {
     private Range<Integer> fpsRange;
     public volatile FrameSink sink;
 
-    public CameraRig(Activity act, TextureView tv, Callback cb) {
-        this.act = act; this.tv = tv; this.cb = cb;
+    public final boolean front;
+
+    public CameraRig(Activity act, TextureView tv, Callback cb, boolean front) {
+        this.act = act; this.tv = tv; this.cb = cb; this.front = front;
     }
 
     public void start() {
@@ -77,9 +79,10 @@ public class CameraRig {
         for (String id : mgr.getCameraIdList()) {
             CameraCharacteristics c = mgr.getCameraCharacteristics(id);
             Integer facing = c.get(CameraCharacteristics.LENS_FACING);
-            if (facing != null && facing == CameraCharacteristics.LENS_FACING_BACK) { chosen = id; chars = c; break; }
+            int want = front ? CameraCharacteristics.LENS_FACING_FRONT : CameraCharacteristics.LENS_FACING_BACK;
+            if (facing != null && facing == want) { chosen = id; chars = c; break; }
         }
-        if (chosen == null) { cb.onCameraError("NO BACK CAMERA"); return; }
+        if (chosen == null) { cb.onCameraError(front ? "No selfie camera" : "No back camera"); return; }
 
         Integer so = chars.get(CameraCharacteristics.SENSOR_ORIENTATION);
         sensorOrientation = so == null ? 90 : so;

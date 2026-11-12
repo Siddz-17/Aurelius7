@@ -45,7 +45,7 @@ public final class W {
     }
 
     // ---------------------------------------------------------------------------------- icons
-    public static final int IC_NONE = 0, IC_FLASH = 1, IC_GEAR = 2, IC_BACK = 3, IC_CAM = 4, IC_DOT = 5;
+    public static final int IC_NONE = 0, IC_FLASH = 1, IC_GEAR = 2, IC_BACK = 3, IC_CAM = 4, IC_DOT = 5, IC_FLIP = 6;
 
     static void icon(Canvas c, Paint p, int type, float cx, float cy, float s, int color) {
         p.setColor(color);
@@ -85,6 +85,17 @@ public final class W {
                 c.drawCircle(cx, cy + h * 0.12f, h * 0.3f, p);
                 c.drawLine(cx - h * 0.3f, cy - h * 0.62f, cx + h * 0.3f, cy - h * 0.62f, p);
                 break;
+            case IC_FLIP: {
+                RectF o = new RectF(cx - h * 0.62f, cy - h * 0.62f, cx + h * 0.62f, cy + h * 0.62f);
+                c.drawArc(o, 200, 140, false, p);
+                c.drawArc(o, 20, 140, false, p);
+                // arrow heads
+                float ax = cx + h * 0.62f, ay = cy - h * 0.05f;
+                c.drawLine(ax, ay, ax - h * 0.22f, ay - h * 0.2f, p); c.drawLine(ax, ay, ax + h * 0.18f, ay - h * 0.22f, p);
+                float bx = cx - h * 0.62f, by = cy + h * 0.05f;
+                c.drawLine(bx, by, bx + h * 0.22f, by + h * 0.2f, p); c.drawLine(bx, by, bx - h * 0.18f, by + h * 0.22f, p);
+                break;
+            }
             case IC_DOT:
                 p.setStyle(Paint.Style.FILL);
                 c.drawCircle(cx, cy, h * 0.35f, p);
@@ -653,6 +664,23 @@ public final class W {
             p.setAlpha((int) (255 * Math.min(1f, strength)));
             c.drawRect(0, 0, w, h, p);
             postInvalidateDelayed(55);
+        }
+    }
+
+    // ---------------------------------------------------------------------------------- Selfie screen light
+    /** Warm-white frame around a clear window: the screen becomes a ring light for front-camera sweeps. */
+    public static class ScreenLight extends View {
+        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        public ScreenLight(Context c) { super(c); setClickable(false); }
+        @Override protected void onDraw(Canvas c) {
+            float w = getWidth(), h = getHeight();
+            Path path = new Path();
+            path.setFillType(Path.FillType.EVEN_ODD);
+            path.addRect(0, 0, w, h, Path.Direction.CW);
+            float mx = w * 0.13f, top = h * 0.16f, bot = h * 0.30f;
+            path.addRoundRect(new RectF(mx, top, w - mx, h - bot), dp(getContext(), 22), dp(getContext(), 22), Path.Direction.CW);
+            p.setColor(0xFFFFF6E8);
+            c.drawPath(path, p);
         }
     }
 
