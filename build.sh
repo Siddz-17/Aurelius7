@@ -6,7 +6,9 @@ SDK=/usr/lib/android-sdk/platforms/android-23/android.jar
 VER=$(grep -o 'versionName="[^"]*"' AndroidManifest.xml | cut -d'"' -f2)
 rm -rf build gen && mkdir -p build/obj gen out
 aapt package -f -m -J gen -M AndroidManifest.xml -S res -I $SDK
-javac -nowarn -Xlint:-options -source 8 -target 8 -encoding UTF-8 -bootclasspath $SDK -d build/obj \
+mkdir -p build/stubs
+javac -nowarn -Xlint:-options -source 8 -target 8 -encoding UTF-8 -bootclasspath $SDK -d build/stubs $(find stubs -name '*.java')
+javac -nowarn -Xlint:-options -source 8 -target 8 -encoding UTF-8 -bootclasspath $SDK -cp build/stubs -d build/obj \
   $(find src gen -name '*.java')
 dalvik-exchange --dex --output=build/classes.dex build/obj
 aapt package -f -M AndroidManifest.xml -S res -A assets -I $SDK -F build/app.unsigned.apk

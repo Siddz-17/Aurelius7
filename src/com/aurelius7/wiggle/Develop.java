@@ -151,4 +151,78 @@ public final class Develop {
         tp.setColor(0xFFFFB27A);
         c.drawText(text, w - pad, h - pad, tp);
     }
+
+    // ------------------------------------------------------------------ exports
+
+    /** Wraps each view in a 35mm-style strip: sprocket bands, side margins, orange edge print. */
+    public static Bitmap[] border(Bitmap[] src, String edgeLeft, String edgeRight, android.graphics.Typeface dot) {
+        Bitmap[] out = new Bitmap[src.length];
+        int w = src[0].getWidth(), h = src[0].getHeight();
+        int band = Math.round(w * 0.075f), side = Math.round(w * 0.035f);
+        int W = w + 2 * side, H = h + 2 * band;
+        W += W & 1; H += H & 1;
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        for (int k = 0; k < src.length; k++) {
+            Bitmap b = Bitmap.createBitmap(W, H, Bitmap.Config.ARGB_8888);
+            Canvas c = new Canvas(b);
+            c.drawColor(0xFF050505);
+            p.setColor(0xFF2B2924);
+            float hw = band * 0.42f, hh = band * 0.32f;
+            int n = Math.max(6, Math.round(W / (band * 0.9f)));
+            float step = (W - band * 0.4f - hw) / (n - 1);
+            for (int i = 0; i < n; i++) {
+                float x = band * 0.2f + i * step;
+                c.drawRoundRect(new android.graphics.RectF(x, band * 0.18f, x + hw, band * 0.18f + hh), hh * 0.25f, hh * 0.25f, p);
+                c.drawRoundRect(new android.graphics.RectF(x, H - band * 0.18f - hh, x + hw, H - band * 0.18f), hh * 0.25f, hh * 0.25f, p);
+            }
+            c.drawBitmap(src[k], side, band, p);
+            Paint tp = new Paint(Paint.ANTI_ALIAS_FLAG);
+            if (dot != null) tp.setTypeface(dot);
+            tp.setColor(0xFFE8873A);
+            tp.setTextSize(band * 0.3f);
+            float ty = band * 0.62f + tp.getTextSize() * 0.35f;
+            tp.setTextAlign(Paint.Align.LEFT);
+            c.drawText(edgeLeft, side, band * 0.5f + band * 0.42f, tp);
+            tp.setTextAlign(Paint.Align.RIGHT);
+            c.drawText(edgeRight, W - side, band * 0.5f + band * 0.42f, tp);
+            out[k] = b;
+        }
+        return out;
+    }
+
+    /**
+     * Lenticular print sheet: the 4 views interlaced column by column (view order reversed, as lenses flip
+     * the image). Printed at 240 dpi under a 60 LPI lenticular sheet, each lens covers exactly 4 pixels.
+     */
+    public static Bitmap lenticular(Bitmap[] views, int outW, android.graphics.Typeface dot) {
+        int w = views[0].getWidth(), h = views[0].getHeight();
+        outW -= outW % 4;
+        int outH = Math.round(h * (outW / (float) w));
+        int margin = Math.round(outW * 0.06f), footer = Math.round(outW * 0.07f);
+        Bitmap sheet = Bitmap.createBitmap(outW + 2 * margin, outH + 2 * margin + footer, Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(sheet);
+        c.drawColor(0xFFFFFFFF);
+        int[][] px = new int[views.length][];
+        Bitmap[] sc = new Bitmap[views.length];
+        for (int k = 0; k < views.length; k++) {
+            sc[k] = Bitmap.createScaledBitmap(views[k], outW, outH, true);
+            px[k] = new int[outW * outH];
+            sc[k].getPixels(px[k], 0, outW, 0, 0, outW, outH);
+        }
+        int[] inter = new int[outW * outH];
+        for (int y = 0; y < outH; y++) {
+            int row = y * outW;
+            for (int x = 0; x < outW; x++) inter[row + x] = px[3 - (x & 3)][row + x];
+        }
+        Bitmap ib = Bitmap.createBitmap(inter, outW, outH, Bitmap.Config.ARGB_8888);
+        c.drawBitmap(ib, margin, margin, null);
+        Paint tp = new Paint(Paint.ANTI_ALIAS_FLAG);
+        if (dot != null) tp.setTypeface(dot);
+        tp.setColor(0xFF14110A);
+        tp.setTextSize(footer * 0.32f);
+        c.drawText("AURELIUS7 \u00B7 LENTICULAR \u00B7 PRINT AT 240 DPI \u00B7 60 LPI LENS \u00B7 LENSES VERTICAL", margin, outH + margin + footer * 0.75f, tp);
+        for (Bitmap b : sc) b.recycle();
+        ib.recycle();
+        return sheet;
+    }
 }

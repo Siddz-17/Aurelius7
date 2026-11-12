@@ -21,6 +21,12 @@ import android.graphics.Paint;
 import android.graphics.RectF;
 import android.graphics.SurfaceTexture;
 import android.graphics.drawable.GradientDrawable;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
+import android.media.FaceDetector;
+import android.view.KeyEvent;
 import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import android.os.Bundle;
@@ -56,7 +62,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity implements TextureView.SurfaceTextureListener,
-        CameraRig.Callback, SweepRecorder.Listener {
+        CameraRig.Callback, SweepRecorder.Listener, SensorEventListener {
+
+    public static final String ACTION_CAMERA = "com.aurelius7.wiggle.CAMERA";
 
     private static final int ST_PREVIEW = 0, ST_CAPTURE = 1, ST_PROCESS = 2, ST_RESULT = 3;
     private static final int[] SEQ_BOUNCE = {0, 1, 2, 3, 2, 1}, SEQ_FWD = {0, 1, 2, 3};
@@ -127,6 +135,26 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     private volatile boolean saving, updating;
     private Updater.Info pendingUpdate;
 
+    // v0.5
+    private SoundFx sfx;
+    private SensorManager sensors;
+    private boolean sounds, volShutter, autoFaces, rollMode, borderOn, printFmt, tiltRes;
+    private long lastManualAim;
+    private float tiltAngle;
+    private long lastGyroNs;
+    private int tiltIdx = -1;
+    private W.Segmented viewSeg;
+    private W.Pill borderPill, rollPill;
+    private View viewerScreen;
+    private W.FilmStage viewerStage;
+    private TextView viewerSub;
+    private W.Segmented viewerSeg;
+    private Bitmap[] viewerFrames;
+    private Item viewerItem;
+    private boolean viewerTilt;
+    private int viewerPos;
+    private volatile boolean rollBusy;
+
     // ================================================================= setup
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -142,6 +170,8 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         w.setStatusBarColor(W.BG);
         w.setNavigationBarColor(W.BG);
 
+        sfx = new SoundFx(this);
+        sensors = (SensorManager) getSystemService(SENSOR_SERVICE);
         root = new FrameLayout(this);
         root.setBackgroundColor(W.BG);
         root.setFitsSystemWindows(true);
@@ -150,7 +180,8 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         galleryScreen = buildGallery();
         settingsScreen = buildSettings();
         welcomeScreen = buildWelcome();
-        View[] all = {cameraScreen, resultScreen, galleryScreen, settingsScreen, welcomeScreen};
+        viewerScreen = buildViewer();
+        View[] all = {cameraScreen, resultScreen, galleryScreen, settingsScreen, welcomeScreen, viewerScreen};
         for (View v : all) { v.setVisibility(View.GONE); root.addView(v, new FrameLayout.LayoutParams(-1, -1)); }
         setContentView(root);
 
@@ -174,6 +205,11 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         bounce = prefs.getInt("loop", 0) == 0;
         haptics = prefs.getBoolean("haptics", true);
         seq = bounce ? SEQ_BOUNCE : SEQ_FWD;
+        sounds = prefs.getBoolean("sounds", true);
+        volShutter = prefs.getBoolean("volShutter", true);
+        autoFaces = prefs.getBoolean("autoFaces", true);
+        rollMode = prefs.getBoolean("roll", false);
+        borderOn = prefs.getBoolean("border", false);
     }
 
     private void put(String k, int v) { prefs.edit().putInt(k, v).apply(); }
@@ -190,6 +226,97 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         currentScreen = screen;
         screen.setVisibility(View.VISIBLE);
         if (screen == galleryScreen) loadGallery();
+        updateSensors();
+        if (screen == cameraScreen) scheduleFaceAim();
+    }
+
+    // ================================================================= tilt-to-view (gyro yaw -> view index)
+    private boolean tiltWanted() {
+        return resumed && ((currentScreen == resultScreen && tiltRes) || (currentScreen == viewerScreen && viewerTilt));
+    }
+
+    private void updateSensors() {
+        if (sensors == null) return;
+        sensors.unregisterListener(this);
+        if (!tiltWanted()) return;
+        tiltAngle = 0; lastGyroNs = 0; tiltIdx = -1;
+        Sensor g = sensors.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
+        if (g == null) g = sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+        if (g != null) sensors.registerListener(this, g, SensorManager.SENSOR_DELAY_GAME);
+        showTiltFrame();
+    }
+
+    @Override public void onSensorChanged(SensorEvent e) {
+        if (e.sensor.getType() == Sensor.TYPE_GYROSCOPE) {
+            if (lastGyroNs != 0) {
+                float dt = (e.timestamp - lastGyroNs) / 1e9f;
+                tiltAngle += e.values[1] * dt;      // yaw around the phone's vertical axis
+                tiltAngle *= 0.992f;                // slowly re-centres, so drift never sticks
+            }
+            lastGyroNs = e.timestamp;
+        } else {
+            tiltAngle = (float) Math.atan2(e.values[0], Math.max(0.1f, e.values[2])) * 0.6f;
+        }
+        showTiltFrame();
+    }
+
+    @Override public void onAccuracyChanged(Sensor s, int a) {}
+
+    private void showTiltFrame() {
+        float t = Math.max(0f, Math.min(1f, (tiltAngle / 0.22f + 1f) / 2f));
+        int idx = Math.round(t * 3f);
+        if (idx == tiltIdx) return;
+        tiltIdx = idx;
+        if (currentScreen == resultScreen && tiltRes && outFrames != null) stage.setFrame(outFrames[idx]);
+        else if (currentScreen == viewerScreen && viewerTilt && viewerFrames != null) viewerStage.setFrame(viewerFrames[idx]);
+        if (haptics) stage.performHapticFeedback(1);
+    }
+
+    // ================================================================= auto-aim on faces
+    private final Runnable faceAim = new Runnable() { @Override public void run() { aimAtFace(); } };
+
+    private void scheduleFaceAim() {
+        ui.removeCallbacks(faceAim);
+        if (autoFaces) ui.postDelayed(faceAim, 900);
+    }
+
+    private void aimAtFace() {
+        if (!autoFaces || !resumed || currentScreen != cameraScreen || state != ST_PREVIEW || !cameraStarted) return;
+        if (SystemClock.uptimeMillis() - lastManualAim < 5000) { scheduleFaceAim(); return; }
+        final int bw = 180, bh = Math.round(180 / contentAspect) & ~1;
+        final Bitmap src;
+        try { src = texture.getBitmap(bw, bh); } catch (Exception e) { scheduleFaceAim(); return; }
+        if (src == null) { scheduleFaceAim(); return; }
+        worker.execute(new Runnable() { @Override public void run() {
+            float[] hit = null;
+            try {
+                Bitmap b565 = src.copy(Bitmap.Config.RGB_565, false);
+                FaceDetector.Face[] faces = new FaceDetector.Face[3];
+                int n = new FaceDetector(bw, bh, 3).findFaces(b565, faces);
+                float best = 0;
+                for (int i = 0; i < n; i++) {
+                    if (faces[i] == null || faces[i].confidence() < 0.4f) continue;
+                    if (faces[i].eyesDistance() > best) {
+                        best = faces[i].eyesDistance();
+                        android.graphics.PointF m = new android.graphics.PointF();
+                        faces[i].getMidPoint(m);
+                        hit = new float[]{m.x / bw, (m.y + best * 0.6f) / bh};
+                    }
+                }
+                b565.recycle();
+            } catch (Throwable ignored) {}
+            src.recycle();
+            final float[] fh = hit;
+            ui.post(new Runnable() { @Override public void run() {
+                if (fh != null && state == ST_PREVIEW && SystemClock.uptimeMillis() - lastManualAim >= 5000) {
+                    float u = 0.5f + (fh[0] - 0.5f) * scaleX, v = 0.5f + (fh[1] - 0.5f) * scaleY;
+                    brackets.u = Math.max(0.12f, Math.min(0.88f, u));
+                    brackets.v = Math.max(0.16f, Math.min(0.78f, v));
+                    brackets.invalidate();
+                }
+                scheduleFaceAim();
+            }});
+        }});
     }
 
     private TextView text(String t, float sp, int color, android.graphics.Typeface tf) {
@@ -337,6 +464,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         grainLive = new W.GrainView(this);
         vp.addView(grainLive, new FrameLayout.LayoutParams(-1, -1));
         brackets = new W.Brackets(this);
+        brackets.listener = new W.Brackets.OnFocus() { @Override public void onFocus(float u, float v) { lastManualAim = SystemClock.uptimeMillis(); } };
         vp.addView(brackets, new FrameLayout.LayoutParams(-1, -1));
 
         LinearLayout top = row();
@@ -481,6 +609,11 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
 
     private void updateExp() {
         expPill.setIcon(W.IC_NONE);
+        if (rollMode) {
+            int r = Store.rollShots(this).size();
+            expPill.setText("ROLL " + (r < 10 ? "0" : "") + r + "/" + Store.ROLL_SIZE);
+            return;
+        }
         int n = galleryItems.size();
         expPill.setText("EXP " + (n < 10 ? "0" : "") + n);
     }
@@ -569,12 +702,29 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
             if (composer != null) { composer.aspect = ASPECTS[i]; baseFrames = composer.render(); syncStageFocus(); develop(); }
             markDirty(); }};
         segs.addView(ratioSeg, new LinearLayout.LayoutParams(0, -2, 1.4f));
-        formatSeg = new W.Segmented(this, new String[]{"GIF", "MP4"}, mp4 ? 1 : 0, true);
-        formatSeg.listener = new W.Segmented.OnPick() { @Override public void onPick(int i) { mp4 = i == 1; markDirty(); } };
+        formatSeg = new W.Segmented(this, new String[]{"GIF", "MP4", "PRINT"}, mp4 ? 1 : 0, true);
+        formatSeg.listener = new W.Segmented.OnPick() { @Override public void onPick(int i) {
+            printFmt = i == 2; if (i < 2) mp4 = i == 1; markDirty(); } };
         LinearLayout.LayoutParams fl = new LinearLayout.LayoutParams(0, -2, 1); fl.leftMargin = dp(8);
         segs.addView(formatSeg, fl);
         LinearLayout.LayoutParams sgl = lp(-1, -2); sgl.topMargin = dp(8);
         panel.addView(segs, sgl);
+
+        LinearLayout vrow = row();
+        viewSeg = new W.Segmented(this, new String[]{"LOOP", "TILT"}, 0, true);
+        viewSeg.listener = new W.Segmented.OnPick() { @Override public void onPick(int i) {
+            tiltRes = i == 1;
+            if (tiltRes) { stopLoop(); updateSensors(); flashResultHint("Tilt the phone left / right"); }
+            else { updateSensors(); startLoop(); } }};
+        vrow.addView(viewSeg, new LinearLayout.LayoutParams(0, -2, 1.4f));
+        borderPill = pill("FILM BORDER", W.IC_NONE, W.Pill.GHOST, 11, true);
+        borderPill.setSel(borderOn);
+        borderPill.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            borderOn = !borderOn; put("border", borderOn); borderPill.setSel(borderOn); markDirty(); develop(); }});
+        LinearLayout.LayoutParams bpl = new LinearLayout.LayoutParams(0, dp(34), 1); bpl.leftMargin = dp(8);
+        vrow.addView(borderPill, bpl);
+        LinearLayout.LayoutParams vrl = lp(-1, -2); vrl.topMargin = dp(8);
+        panel.addView(vrow, vrl);
 
         LinearLayout btns = row();
         retakeBtn = bigPill("Retake", W.Pill.GHOST);
@@ -601,11 +751,20 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         speedSlider.setValue((fps - 4) / 12f);
         speedVal.setText(fps + "FPS");
         ratioSeg.setSel(aspectIdx);
-        formatSeg.setSel(mp4 ? 1 : 0);
+        formatSeg.setSel(printFmt ? 2 : (mp4 ? 1 : 0));
+        viewSeg.setSel(tiltRes ? 1 : 0);
+        borderPill.setSel(borderOn);
+    }
+
+    private void flashResultHint(String t) {
+        String keep = resSub.getText().toString();
+        resSub.setText(t.toUpperCase(Locale.US));
+        final String k = keep;
+        ui.postDelayed(new Runnable() { @Override public void run() { if (resSub.getText().toString().startsWith("TILT")) resSub.setText(k); } }, 2200);
     }
 
     // ================================================================= GALLERY ("Contact sheet")
-    private static class Item { Uri uri; String mime; long date; String stock; Bitmap thumb; }
+    private static class Item { Uri uri; String mime; long date; String stock; String name; Bitmap thumb; }
 
     private View buildGallery() {
         LinearLayout s = col();
@@ -635,6 +794,12 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         }
         LinearLayout.LayoutParams fl = lp(-1, -2); fl.topMargin = dp(16); fl.bottomMargin = dp(14);
         s.addView(f, fl);
+
+        rollPill = pill("", W.IC_NONE, W.Pill.SOLID, 13, false);
+        rollPill.setVisibility(View.GONE);
+        rollPill.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { developRoll(); } });
+        LinearLayout.LayoutParams rpl = lp(-1, dp(44)); rpl.bottomMargin = dp(14);
+        s.addView(rollPill, rpl);
 
         galEmpty = text("No exposures yet.\nShoot a wiggle and save it — it lands here.", 14, W.MUT, W.UI);
         galEmpty.setGravity(Gravity.CENTER);
@@ -680,6 +845,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
                 it.date = c.getLong(1);
                 it.mime = c.getString(2);
                 String name = c.getString(3);
+                it.name = name;
                 it.stock = "";
                 if (name != null) for (String st : Develop.STOCKS) if (name.contains("_" + st.replace("-", "") + ".")) it.stock = st;
                 out.add(it);
@@ -719,6 +885,13 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
             if (galFilter == 0 || (galFilter == 1 && !vid) || (galFilter == 2 && vid)) list.add(it);
         }
         galCount.setText(galleryItems.size() + " EXP");
+        int rolled = Store.rollShots(this).size();
+        if (rollBusy) { rollPill.setVisibility(View.VISIBLE); }
+        else if (rolled > 0) {
+            rollPill.setText("Roll in camera \u00B7 " + rolled + "/" + Store.ROLL_SIZE + " \u00B7 Develop now");
+            rollPill.setEnabled(true);
+            rollPill.setVisibility(View.VISIBLE);
+        } else rollPill.setVisibility(View.GONE);
         galEmpty.setVisibility(list.isEmpty() ? View.VISIBLE : View.GONE);
         SimpleDateFormat df = new SimpleDateFormat("MMM dd", Locale.US);
         for (int i = 0; i < list.size(); i += 3) {
@@ -734,6 +907,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
             }
             st.listener = new W.Strip.OnPick() { @Override public void onPick(int k) {
                 Item it = list.get(base + k);
+                if (openViewer(it)) return;
                 Intent v = new Intent(Intent.ACTION_VIEW);
                 v.setDataAndType(it.uri, it.mime);
                 v.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
@@ -777,7 +951,19 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         W.Toggle hap = new W.Toggle(this, haptics);
         hap.setContentDescription("Haptic ticks");
         hap.listener = new W.Toggle.OnToggle() { @Override public void onToggle(boolean on) { haptics = on; put("haptics", on); } };
-        setRow(g, "Haptic ticks", "A tap for each of the 4 views", hap, true);
+        setRow(g, "Haptic ticks", "A tap for each of the 4 views", hap, false);
+        W.Toggle snd = new W.Toggle(this, sounds);
+        snd.setContentDescription("Shutter sounds");
+        snd.listener = new W.Toggle.OnToggle() { @Override public void onToggle(boolean on) { sounds = on; put("sounds", on); if (on) sfx.shutter(); } };
+        setRow(g, "Shutter sounds", "Mechanical clack + film advance (silent mode mutes)", snd, false);
+        W.Toggle vol = new W.Toggle(this, volShutter);
+        vol.setContentDescription("Volume button shutter");
+        vol.listener = new W.Toggle.OnToggle() { @Override public void onToggle(boolean on) { volShutter = on; put("volShutter", on); } };
+        setRow(g, "Volume-button shutter", "Steadier sweeps: both hands on the phone", vol, false);
+        W.Toggle fac = new W.Toggle(this, autoFaces);
+        fac.setContentDescription("Auto-aim on faces");
+        fac.listener = new W.Toggle.OnToggle() { @Override public void onToggle(boolean on) { autoFaces = on; put("autoFaces", on); scheduleFaceAim(); } };
+        setRow(g, "Auto-aim on faces", "Brackets jump to the nearest face", fac, true);
 
         g = group(s, "FLASH");
         W.Segmented fls = new W.Segmented(this, FLASH_NAMES, flashIdx, false);
@@ -796,6 +982,15 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         ds.listener = new W.Toggle.OnToggle() { @Override public void onToggle(boolean on) { dateStamp = on; put("date", on); } };
         setRow(g, "Date stamp", "Orange '26 11 13 in the corner", ds, true);
 
+        g = group(s, "ROLL OF 24");
+        W.Toggle rm = new W.Toggle(this, rollMode);
+        rm.setContentDescription("Roll mode");
+        rm.listener = new W.Toggle.OnToggle() { @Override public void onToggle(boolean on) { rollMode = on; put("roll", on); updateExp(); } };
+        setRow(g, "Roll mode", "Shoot now, see them later: develops after 24 exposures", rm, false);
+        W.Pill dev = pill("Develop", W.IC_NONE, W.Pill.GHOST, 13, false);
+        dev.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { show(galleryScreen); developRoll(); } });
+        setRow(g, "Develop roll now", "Don't wait for 24", dev, true);
+
         g = group(s, "EXPORT");
         W.Segmented fm = new W.Segmented(this, new String[]{"GIF", "MP4"}, mp4 ? 1 : 0, false);
         fm.listener = new W.Segmented.OnPick() { @Override public void onPick(int i) { mp4 = i == 1; put("format", i); formatSeg.setSel(i); } };
@@ -803,7 +998,11 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         W.Segmented lpp = new W.Segmented(this, new String[]{"Bounce", "Loop"}, bounce ? 0 : 1, false);
         lpp.listener = new W.Segmented.OnPick() { @Override public void onPick(int i) {
             bounce = i == 0; put("loop", i); seq = bounce ? SEQ_BOUNCE : SEQ_FWD; }};
-        setRow(g, "Loop style", null, lpp, true);
+        setRow(g, "Loop style", null, lpp, false);
+        W.Toggle bo = new W.Toggle(this, borderOn);
+        bo.setContentDescription("Film border");
+        bo.listener = new W.Toggle.OnToggle() { @Override public void onToggle(boolean on) { borderOn = on; put("border", on); } };
+        setRow(g, "Film border", "Sprocket holes + edge print around exports", bo, true);
 
         g = group(s, "APP");
         final W.Pill chk = pill("Check updates", W.IC_NONE, W.Pill.GHOST, 13, false);
@@ -871,11 +1070,37 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.CAMERA}, 7);
         } else maybeStartCamera();
-        if (state == ST_RESULT) startLoop();
+        if (state == ST_RESULT && !tiltRes) startLoop();
+        updateSensors();
+        if (currentScreen == cameraScreen) scheduleFaceAim();
+    }
+
+    @Override protected void onDestroy() {
+        if (sfx != null) sfx.release();
+        worker.shutdown();
+        super.onDestroy();
+    }
+
+    @Override public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if (volShutter && currentScreen == cameraScreen && (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)) {
+            if (event.getRepeatCount() == 0) {
+                if (state == ST_PREVIEW) startSweep();
+                else if (state == ST_CAPTURE && recorder != null) recorder.finishNow();
+            }
+            return true;
+        }
+        return super.onKeyDown(keyCode, event);
+    }
+
+    @Override public boolean onKeyUp(int keyCode, KeyEvent event) {
+        if (volShutter && currentScreen == cameraScreen && (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)) return true;
+        return super.onKeyUp(keyCode, event);
     }
 
     @Override protected void onPause() {
         resumed = false;
+        if (sensors != null) sensors.unregisterListener(this);
+        ui.removeCallbacks(faceAim);
         stopLoop();
         stopTimer();
         if (state == ST_CAPTURE || state == ST_PROCESS) {
@@ -978,6 +1203,8 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         hud.set(0, orbit ? "Keep curving →" : "Keep sliding →", false, orbit);
         hud.setVisibility(View.VISIBLE);
         buzz(25);
+        if (sounds) sfx.shutter();
+        ui.removeCallbacks(faceAim);
         captureStart = SystemClock.uptimeMillis();
         startTimer();
         final SweepRecorder r = recorder;
@@ -1032,6 +1259,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
             final float targetAspect = ASPECTS[aspectIdx];
             final int stock = liveStock, gr = defaultGrain(liveStock);
             final boolean stamp = dateStamp;
+            if (rollMode) { exposeToRoll(r, orient, u, v, targetAspect, stock); return; }
             new Thread(new Runnable() { @Override public void run() {
                 String err = null; Composer comp = null; Bitmap[] base = null, dev = null;
                 boolean low = r.lowDepth;
@@ -1076,7 +1304,79 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         markDirty();
         syncStageFocus();
         show(resultScreen);
-        startLoop();
+        if (tiltRes) { stopLoop(); showTiltFrameForce(); } else startLoop();
+    }
+
+    private void showTiltFrameForce() { tiltIdx = -1; showTiltFrame(); }
+
+    // ================================================================= roll of 24
+    private void exposeToRoll(final SweepRecorder r, final int orient, final float u, final float v, final float aspect, final int stock) {
+        new Thread(new Runnable() { @Override public void run() {
+            String err = null;
+            try {
+                WiggleBuilder.Result res = WiggleBuilder.build(r, orient, 720);
+                if (res.error != null) err = res.error;
+                else {
+                    Composer comp = new Composer(res.frames, res.seeds);
+                    comp.aspect = aspect;
+                    comp.align(u, v);
+                    Bitmap[] base = comp.render();
+                    java.io.File dir = new java.io.File(Store.rollRoot(MainActivity.this), String.valueOf(System.currentTimeMillis()));
+                    Store.saveFrames(dir, base, 92);
+                    Store.writeMeta(dir, stock);
+                }
+            } catch (Throwable t) { err = "Exposure failed: " + t.getClass().getSimpleName(); }
+            r.release();
+            final String fe = err;
+            runOnUiThread(new Runnable() { @Override public void run() {
+                recorder = null;
+                setPreviewState();
+                if (fe != null) { flashInfo(fe); return; }
+                if (sounds) sfx.advance();
+                int n = Store.rollShots(MainActivity.this).size();
+                showStamp("EXP " + (n < 10 ? "0" : "") + n + "/" + Store.ROLL_SIZE);
+                scheduleFaceAim();
+                if (n >= Store.ROLL_SIZE) { show(galleryScreen); developRoll(); }
+            }});
+        }}, "aurelius-roll").start();
+    }
+
+    private void developRoll() {
+        if (rollBusy) return;
+        final List<java.io.File> shots = Store.rollShots(this);
+        if (shots.isEmpty()) { flashInfo("Roll is empty"); return; }
+        rollBusy = true;
+        rollPill.setEnabled(false);
+        rollPill.setVisibility(View.VISIBLE);
+        rollPill.setText("Developing 0/" + shots.size() + "\u2026");
+        final int grLevel = prefs.getInt("grainLevel", 2);
+        final boolean stamp = dateStamp, asMp4 = mp4, bord = borderOn;
+        final int[] sq = seq; final int fms = frameMs;
+        new Thread(new Runnable() { @Override public void run() {
+            int done = 0;
+            for (java.io.File dir : shots) {
+                try {
+                    Bitmap[] base = Store.loadFrames(dir);
+                    if (base != null) {
+                        int stock = Store.readMeta(dir, 1);
+                        int gr = Math.min(100, Math.round(Develop.STOCK_GRAIN[stock] * GRAIN_LEVELS[grLevel]));
+                        Bitmap[] dev = Develop.apply(base, stock, gr, stamp, W.DOT);
+                        exportBlocking(dev, sq, fms, asMp4, bord, Develop.STOCKS[stock].replace("-", ""), done + 1);
+                    }
+                    Store.deleteDir(dir);
+                } catch (Throwable ignored) {}
+                done++;
+                final int d = done;
+                runOnUiThread(new Runnable() { @Override public void run() { rollPill.setText("Developing " + d + "/" + shots.size() + "\u2026"); }});
+            }
+            runOnUiThread(new Runnable() { @Override public void run() {
+                rollBusy = false;
+                if (sounds) sfx.advance();
+                showStamp("ROLL DEVELOPED");
+                updateExp();
+                loadGallery();
+            }});
+        }}, "aurelius-develop-roll").start();
     }
 
     private void reopenLast() {
@@ -1124,13 +1424,13 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
             ui.post(new Runnable() { @Override public void run() {
                 if (gen != devGen) return;
                 outFrames = dev;
-                if (state == ST_RESULT) stage.setFrame(outFrames[seq[loopPos % seq.length]]);
+                if (state == ST_RESULT) stage.setFrame(tiltRes ? outFrames[Math.max(0, tiltIdx)] : outFrames[seq[loopPos % seq.length]]);
             }});
         }});
     }
 
     private final Runnable loopTick = new Runnable() { @Override public void run() {
-        if (outFrames == null || state != ST_RESULT) return;
+        if (outFrames == null || state != ST_RESULT || tiltRes) return;
         stage.setFrame(outFrames[seq[loopPos % seq.length]]);
         loopPos++;
         ui.postDelayed(this, frameMs);
@@ -1151,6 +1451,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
 
     @Override public void onBackPressed() {
         if (currentScreen == resultScreen) { retake(); return; }
+        if (currentScreen == viewerScreen) { closeViewer(); return; }
         if (currentScreen == galleryScreen || currentScreen == settingsScreen) { show(cameraScreen); return; }
         if (state == ST_CAPTURE && recorder != null) { recorder.finishNow(); return; }
         super.onBackPressed();
@@ -1162,72 +1463,217 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         if (savedUri != null) { if (thenShare) share(savedUri, savedMime); return; }
         saving = true;
         saveBtn.setEnabled(false); shareBtn.setEnabled(false); retakeBtn.setEnabled(false);
-        saveBtn.setText(mp4 ? "MP4…" : "GIF…");
+        saveBtn.setText(printFmt ? "PRINT\u2026" : (mp4 ? "MP4\u2026" : "GIF\u2026"));
         final Bitmap[] frames = outFrames;
         final int[] sq = seq;
         final int fms = frameMs;
-        final boolean asMp4 = mp4;
+        final boolean asMp4 = mp4, asPrint = printFmt, bord = borderOn;
         final String stockTag = Develop.STOCKS[resStock].replace("-", "");
+        final int exp = galleryItems.size() + 1;
         new Thread(new Runnable() { @Override public void run() {
             Uri uri = null; String err = null;
-            ContentResolver cr = getContentResolver();
-            String stampName = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
-            File tmp = null;
             try {
-                ContentValues cv = new ContentValues();
-                Uri coll;
-                if (asMp4) {
-                    tmp = new File(getCacheDir(), "wiggle_" + stampName + ".mp4");
-                    Mp4Encoder.encode(frames, sq, fms, 4000, tmp);
-                    cv.put(MediaStore.MediaColumns.DISPLAY_NAME, "AURELIUS7_" + stampName + "_" + stockTag + ".mp4");
-                    cv.put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4");
-                    cv.put("relative_path", "Movies/Aurelius7");
-                    coll = MediaStore.Video.Media.EXTERNAL_CONTENT_URI;
-                } else {
-                    cv.put(MediaStore.MediaColumns.DISPLAY_NAME, "AURELIUS7_" + stampName + "_" + stockTag + ".gif");
-                    cv.put(MediaStore.MediaColumns.MIME_TYPE, "image/gif");
-                    cv.put("relative_path", "Pictures/Aurelius7");
-                    coll = MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
-                }
-                cv.put("is_pending", 1);
-                uri = cr.insert(coll, cv);
-                if (uri == null) throw new RuntimeException("MediaStore insert failed");
-                OutputStream os = cr.openOutputStream(uri);
-                try {
-                    if (asMp4) {
-                        InputStream in = new FileInputStream(tmp);
-                        try { byte[] buf = new byte[1 << 16]; int n; while ((n = in.read(buf)) > 0) os.write(buf, 0, n); }
-                        finally { in.close(); }
-                    } else {
-                        BufferedOutputStream bo = new BufferedOutputStream(os, 1 << 16);
-                        GifEncoder.encode(frames, sq, Math.max(2, fms / 10), bo);
-                        bo.flush();
-                    }
-                } finally { os.close(); }
-                ContentValues done = new ContentValues();
-                done.put("is_pending", 0);
-                cr.update(uri, done, null, null);
+                uri = asPrint ? exportPrint(frames) : exportBlocking(frames, sq, fms, asMp4, bord, stockTag, exp);
             } catch (Throwable t) {
                 err = t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
-                if (uri != null) { try { cr.delete(uri, null, null); } catch (Exception ignored) {} }
-                uri = null;
-            } finally {
-                if (tmp != null) tmp.delete();
             }
             final Uri fu = uri; final String fe = err;
-            final String mime = asMp4 ? "video/mp4" : "image/gif";
+            final String mime = asPrint ? "image/png" : (asMp4 ? "video/mp4" : "image/gif");
             runOnUiThread(new Runnable() { @Override public void run() {
                 saving = false;
                 retakeBtn.setEnabled(true); shareBtn.setEnabled(true); saveBtn.setEnabled(true);
                 if (fu == null) { saveBtn.setText("Save"); resSub.setText("SAVE FAILED: " + fe); return; }
                 savedUri = fu; savedMime = mime;
-                saveBtn.setText("Saved ✓");
-                showStamp("SAVED");
+                saveBtn.setText("Saved \u2713");
+                showStamp(asPrint ? "PRINT READY" : "SAVED");
                 buzz(25);
+                if (sounds) sfx.advance();
                 loadGallery();
                 if (thenShare) share(fu, mime);
             }});
         }}, "aurelius-export").start();
+    }
+
+    /** Writes a GIF/MP4 to MediaStore (+ the 4 views as a private sidecar for tilt/print). Blocking. */
+    private Uri exportBlocking(Bitmap[] frames, int[] sq, int fms, boolean asMp4, boolean bord, String stockTag, int exp) throws Exception {
+        ContentResolver cr = getContentResolver();
+        String stampName = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
+        String base = "AURELIUS7_" + stampName + "_" + (System.nanoTime() % 1000) + "_" + stockTag;
+        Bitmap[] outF = bord ? Develop.border(frames, "AURELIUS7 400", "\u25B8 " + exp, W.DOT) : frames;
+        File tmp = null;
+        Uri uri = null;
+        try {
+            ContentValues cv = new ContentValues();
+            Uri coll;
+            if (asMp4) {
+                tmp = new File(getCacheDir(), base + ".mp4");
+                Mp4Encoder.encode(outF, sq, fms, 4000, tmp);
+                cv.put(MediaStore.MediaColumns.DISPLAY_NAME, base + ".mp4");
+                cv.put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4");
+                cv.put("relative_path", "Movies/Aurelius7");
+                coll = MediaStore.Video.Media.EXTERNAL_CONTENT_URI;
+            } else {
+                cv.put(MediaStore.MediaColumns.DISPLAY_NAME, base + ".gif");
+                cv.put(MediaStore.MediaColumns.MIME_TYPE, "image/gif");
+                cv.put("relative_path", "Pictures/Aurelius7");
+                coll = MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+            }
+            cv.put("is_pending", 1);
+            uri = cr.insert(coll, cv);
+            if (uri == null) throw new RuntimeException("MediaStore insert failed");
+            OutputStream os = cr.openOutputStream(uri);
+            try {
+                if (asMp4) {
+                    InputStream in = new FileInputStream(tmp);
+                    try { byte[] buf = new byte[1 << 16]; int n; while ((n = in.read(buf)) > 0) os.write(buf, 0, n); }
+                    finally { in.close(); }
+                } else {
+                    BufferedOutputStream bo = new BufferedOutputStream(os, 1 << 16);
+                    GifEncoder.encode(outF, sq, Math.max(2, fms / 10), bo);
+                    bo.flush();
+                }
+            } finally { os.close(); }
+            ContentValues done = new ContentValues();
+            done.put("is_pending", 0);
+            cr.update(uri, done, null, null);
+            try { Store.saveFrames(Store.wiggleDir(this, base), frames, 88); } catch (Exception ignored) {}
+            return uri;
+        } catch (Exception e) {
+            if (uri != null) { try { cr.delete(uri, null, null); } catch (Exception ignored) {} }
+            throw e;
+        } finally {
+            if (tmp != null) tmp.delete();
+        }
+    }
+
+    /** Lenticular print sheet PNG (240 dpi, 60 LPI). Blocking. */
+    private Uri exportPrint(Bitmap[] frames) throws Exception {
+        ContentResolver cr = getContentResolver();
+        Bitmap sheet = Develop.lenticular(frames, 1200, W.DOT);
+        String name = "AURELIUS7_PRINT_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".png";
+        ContentValues cv = new ContentValues();
+        cv.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+        cv.put(MediaStore.MediaColumns.MIME_TYPE, "image/png");
+        cv.put("relative_path", "Pictures/Aurelius7/Prints");
+        cv.put("is_pending", 1);
+        Uri uri = cr.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv);
+        if (uri == null) throw new RuntimeException("MediaStore insert failed");
+        try {
+            OutputStream os = cr.openOutputStream(uri);
+            try { sheet.compress(Bitmap.CompressFormat.PNG, 100, os); } finally { os.close(); }
+            ContentValues done = new ContentValues();
+            done.put("is_pending", 0);
+            cr.update(uri, done, null, null);
+            return uri;
+        } catch (Exception e) {
+            try { cr.delete(uri, null, null); } catch (Exception ignored) {}
+            throw e;
+        } finally { sheet.recycle(); }
+    }
+
+    // ================================================================= in-app viewer (tilt / loop / print)
+    private View buildViewer() {
+        LinearLayout s = col();
+        s.setBackgroundColor(W.BG);
+        s.setClickable(true);
+        LinearLayout head = row();
+        head.setPadding(dp(16), dp(14), dp(16), 0);
+        W.IconBtn back = new W.IconBtn(this, W.IC_BACK, "Back to contact sheet");
+        back.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { closeViewer(); } });
+        head.addView(back, lp(dp(44), dp(44)));
+        LinearLayout tc = col();
+        tc.addView(text("Exposure", 18, W.TXT, W.HEAD));
+        viewerSub = text("", 11, W.MUT, W.DOT);
+        LinearLayout.LayoutParams sl = lp(-2, -2); sl.topMargin = dp(3);
+        tc.addView(viewerSub, sl);
+        LinearLayout.LayoutParams tcl = lp(-2, -2); tcl.leftMargin = dp(12);
+        head.addView(tc, tcl);
+        s.addView(head);
+
+        viewerStage = new W.FilmStage(this);
+        s.addView(viewerStage, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        LinearLayout panel = col();
+        GradientDrawable bgd = new GradientDrawable();
+        bgd.setColor(W.SURF);
+        float r = W.dp(this, 26);
+        bgd.setCornerRadii(new float[]{r, r, r, r, 0, 0, 0, 0});
+        panel.setBackground(bgd);
+        panel.setPadding(dp(16), dp(16), dp(16), dp(18));
+        s.addView(panel, lp(-1, -2));
+        viewerSeg = new W.Segmented(this, new String[]{"LOOP", "TILT"}, 0, true);
+        viewerSeg.listener = new W.Segmented.OnPick() { @Override public void onPick(int i) {
+            viewerTilt = i == 1; updateSensors(); if (!viewerTilt) startViewerLoop(); }};
+        panel.addView(viewerSeg, lp(-1, -2));
+        LinearLayout btns = row();
+        W.Pill open = bigPill("Open", W.Pill.GHOST);
+        final W.Pill print = bigPill("Print", W.Pill.GHOST);
+        W.Pill sh = bigPill("Share", W.Pill.SOLID);
+        btns.addView(open, lpw(dp(56), 1));
+        LinearLayout.LayoutParams b2 = lpw(dp(56), 1); b2.leftMargin = dp(10);
+        btns.addView(print, b2);
+        LinearLayout.LayoutParams b3 = lpw(dp(56), 1.2f); b3.leftMargin = dp(10);
+        btns.addView(sh, b3);
+        open.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            if (viewerItem == null) return;
+            Intent i = new Intent(Intent.ACTION_VIEW);
+            i.setDataAndType(viewerItem.uri, viewerItem.mime);
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            try { startActivity(i); } catch (Exception ignored) {}
+        }});
+        sh.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (viewerItem != null) share(viewerItem.uri, viewerItem.mime); } });
+        print.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            if (viewerFrames == null) return;
+            final Bitmap[] fr = viewerFrames;
+            print.setText("\u2026");
+            new Thread(new Runnable() { @Override public void run() {
+                Uri u = null;
+                try { u = exportPrint(fr); } catch (Throwable ignored) {}
+                final Uri fu = u;
+                runOnUiThread(new Runnable() { @Override public void run() {
+                    print.setText("Print");
+                    if (fu != null) { showStamp("PRINT READY"); share(fu, "image/png"); }
+                    else viewerSub.setText("PRINT FAILED");
+                }});
+            }}).start();
+        }});
+        LinearLayout.LayoutParams bl = lp(-1, -2); bl.topMargin = dp(14);
+        panel.addView(btns, bl);
+        return s;
+    }
+
+    private boolean openViewer(Item it) {
+        if (it.name == null) return false;
+        String base = it.name.replaceAll("\\.(gif|mp4)$", "");
+        final java.io.File dir = Store.wiggleDir(this, base);
+        if (!Store.hasFrames(dir)) return false;
+        Bitmap[] fr = Store.loadFrames(dir);
+        if (fr == null) return false;
+        viewerItem = it;
+        viewerFrames = fr;
+        viewerTilt = false;
+        viewerSeg.setSel(0);
+        viewerSub.setText((it.stock.isEmpty() ? "AURELIUS7" : it.stock) + " \u00B7 "
+                + new SimpleDateFormat("MMM dd", Locale.US).format(new Date(it.date * 1000)).toUpperCase(Locale.US)
+                + " \u00B7 " + (it.mime != null && it.mime.startsWith("video") ? "MP4" : "GIF"));
+        show(viewerScreen);
+        startViewerLoop();
+        return true;
+    }
+
+    private final Runnable viewerTick = new Runnable() { @Override public void run() {
+        if (viewerFrames == null || currentScreen != viewerScreen || viewerTilt) return;
+        viewerStage.setFrame(viewerFrames[seq[viewerPos % seq.length]]);
+        viewerPos++;
+        ui.postDelayed(this, frameMs);
+    }};
+    private void startViewerLoop() { ui.removeCallbacks(viewerTick); viewerPos = 0; ui.post(viewerTick); }
+
+    private void closeViewer() {
+        ui.removeCallbacks(viewerTick);
+        viewerTilt = false;
+        viewerFrames = null;
+        show(galleryScreen);
     }
 
     private void share(Uri uri, String mime) {
@@ -1311,6 +1757,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
 
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        if (intent != null && ACTION_CAMERA.equals(intent.getAction()) && state == ST_PREVIEW && prefs.getBoolean("onboarded", false)) show(cameraScreen);
         handleInstallIntent(intent);
     }
 
