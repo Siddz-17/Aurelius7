@@ -40,6 +40,8 @@ public class SweepRecorder implements CameraRig.FrameSink {
     private volatile boolean done;
     private byte[] scratch = new byte[0];
     public boolean lowDepth;
+    private volatile boolean finishRequested;
+    public void finishNow() { finishRequested = true; }
 
     public SweepRecorder(int w, int h, float focusX, float focusY, float targetFactor, Listener l) {
         W = w; H = h; TW = w / 4; TH = h / 4;
@@ -98,7 +100,7 @@ public class SweepRecorder implements CameraRig.FrameSink {
         float prog = Math.min(1f, par / target);
         listener.onSweepProgress(Math.max(prog, Math.min(0.15f, el / (float) MAX_MS)), coach, par);
 
-        if ((par >= target && el > MIN_MS) || el > MAX_MS || frames.size() >= MAX_FRAMES || (edge && frames.size() >= 4)) {
+        if ((finishRequested && frames.size() >= 4) || (par >= target && el > MIN_MS) || el > MAX_MS || frames.size() >= MAX_FRAMES || (edge && frames.size() >= 4)) {
             done = true;
             lowDepth = par < target * 0.35f;
             listener.onSweepDone(this);

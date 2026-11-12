@@ -28,20 +28,19 @@ public final class WiggleBuilder {
         if (n < 4) { res.error = "TOO FEW FRAMES. HOLD STEADY + SLIDE."; return res; }
         int W = rec.W, H = rec.H;
 
-        // 1. Position of each frame along the sweep (projected parallax), fall back to time.
-        SweepRecorder.Frame last = fr.get(n - 1);
-        float L = (float) Math.hypot(last.px, last.py);
-        float[] s = new float[n];
-        if (L >= 3f) {
-            float dx = last.px / L, dy = last.py / L;
-            for (int i = 0; i < n; i++) s[i] = fr.get(i).px * dx + fr.get(i).py * dy;
-        } else {
-            for (int i = 0; i < n; i++) s[i] = i;
+        // 1. Position of each frame = distance travelled along the (smoothed) parallax path.
+        //    A straight slide and a curved orbit both give an evenly growing value; turning in place doesn't.
+        float[] sx = new float[n], sy = new float[n];
+        for (int i = 0; i < n; i++) {
+            float ax = 0, ay = 0; int c = 0;
+            for (int j = Math.max(0, i - 2); j <= Math.min(n - 1, i + 2); j++) { ax += fr.get(j).px; ay += fr.get(j).py; c++; }
+            sx[i] = ax / c; sy[i] = ay / c;
         }
-        float smax = s[0];
-        int imax = 0;
-        for (int i = 1; i < n; i++) if (s[i] > smax) { smax = s[i]; imax = i; }
-        int end = Math.max(3, imax);
+        float[] s = new float[n];
+        for (int i = 1; i < n; i++) s[i] = s[i - 1] + (float) Math.hypot(sx[i] - sx[i - 1], sy[i] - sy[i - 1]);
+        if (s[n - 1] < 3f) for (int i = 0; i < n; i++) s[i] = i; // no measurable depth: fall back to time
+        float smax = s[n - 1];
+        int end = n - 1;
 
         // 2. Pick 4 frames at 0, 1/3, 2/3, 1 of the way; prefer the sharpest neighbour.
         int[] pick = new int[4];

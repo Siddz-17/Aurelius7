@@ -42,6 +42,7 @@ public class CameraRig {
 
     public int W, H, sensorOrientation;
     private boolean hasContinuousAf;
+    public boolean hasFlash;
     private Range<Integer> fpsRange;
     public volatile FrameSink sink;
 
@@ -87,6 +88,8 @@ public class CameraRig {
         Size size = pickSize(map);
         W = size.getWidth(); H = size.getHeight();
 
+        Boolean fl = chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE);
+        hasFlash = fl != null && fl;
         int[] afModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES);
         hasContinuousAf = false;
         if (afModes != null) for (int m : afModes) if (m == CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE) hasContinuousAf = true;
@@ -186,6 +189,19 @@ public class CameraRig {
         } catch (Exception e) {
             cb.onCameraError("SESSION FAILED: " + e.getMessage());
         }
+    }
+
+    /** Continuous light for the whole sweep (a single flash pop can't light ~40 frames). */
+    public void setTorch(final boolean on) {
+        if (bg == null || !hasFlash) return;
+        bg.post(new Runnable() { @Override public void run() {
+            if (session == null || builder == null) return;
+            try {
+                builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+                builder.set(CaptureRequest.FLASH_MODE, on ? CaptureRequest.FLASH_MODE_TORCH : CaptureRequest.FLASH_MODE_OFF);
+                session.setRepeatingRequest(builder.build(), null, bg);
+            } catch (Exception ignored) {}
+        }});
     }
 
     /** Freeze focus, exposure and white balance so the 4 frames match. */
