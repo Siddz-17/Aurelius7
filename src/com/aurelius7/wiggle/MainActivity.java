@@ -114,7 +114,9 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         try {
             android.content.SharedPreferences sp = getSharedPreferences("aurelius7", MODE_PRIVATE);
             int seen = sp.getInt("seenVersion", 0);
-            if (seen != 0 && seen < versionCode) {
+            PackageInfo pk = getPackageManager().getPackageInfo(getPackageName(), 0);
+            boolean wasUpdated = pk.lastUpdateTime > pk.firstInstallTime;
+            if (seen < versionCode && wasUpdated) {
                 ui.postDelayed(new Runnable() { @Override public void run() { showStamp("UPDATED → " + VERSION); } }, 600);
             }
             sp.edit().putInt("seenVersion", versionCode).apply();
