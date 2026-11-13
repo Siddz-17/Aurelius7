@@ -75,7 +75,7 @@ public final class Develop {
     /** Default grain (0..100) each stock ships with. */
     public static final int[] STOCK_GRAIN = new int[LOOKS.length];
     static {
-        for (int i = 0; i < LOOKS.length; i++) { STOCKS[i] = LOOKS[i].name; STOCK_GRAIN[i] = Math.round(LOOKS[i].grain * 0.4f);  // v0.6.1: much subtler default grain }
+        for (int i = 0; i < LOOKS.length; i++) { STOCKS[i] = LOOKS[i].name; STOCK_GRAIN[i] = Math.round(LOOKS[i].grain * 0.4f); }
     }
 
     private static ColorMatrix contrast(float c, float bright) {
