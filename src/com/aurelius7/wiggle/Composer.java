@@ -93,7 +93,9 @@ public class Composer {
                 long c = sad(half[0], HW, hx, hy, half[k], tx, ty, HP, hb);
                 if (c < hb) { hb = c; rx = cx; ry = cy; }
             }
-            ox[k] = rx * 2; oy[k] = ry * 2;
+            // Offsets beyond a quarter of the frame can't be real parallax; clamping also guarantees
+            // the four views always share at least half the frame, so render() can't go out of bounds.
+            ox[k] = clamp(rx * 2, -W / 4, W / 4); oy[k] = clamp(ry * 2, -H / 4, H / 4);
             // next refocus searches around the current alignment (shake is shared by all depths)
             seeds[k][0] = ox[k]; seeds[k][1] = oy[k];
         }
@@ -107,6 +109,10 @@ public class Composer {
         for (int k = 0; k < 4; k++) {
             L = Math.max(L, -ox[k]); R = Math.min(R, W - ox[k]);
             T = Math.max(T, -oy[k]); B = Math.min(B, H - oy[k]);
+        }
+        if (R - L < 16 || B - T < 16) {            // defensive: should be impossible after the clamp
+            java.util.Arrays.fill(ox, 0); java.util.Arrays.fill(oy, 0);
+            L = 0; R = W; T = 0; B = H;
         }
         int iw = Math.max(2, R - L), ih = Math.max(2, B - T);
         int cw, ch;

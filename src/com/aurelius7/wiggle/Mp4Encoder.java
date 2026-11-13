@@ -57,6 +57,7 @@ public final class Mp4Encoder {
             }
             enc.signalEndOfInputStream();
             drain(enc, mux, st, true);
+            if (!st.started || st.written == 0) throw new RuntimeException("Video encoder produced no frames");
         } finally {
             try { enc.stop(); } catch (Exception ignored) {}
             enc.release();

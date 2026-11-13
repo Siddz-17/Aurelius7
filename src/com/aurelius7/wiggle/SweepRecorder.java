@@ -31,7 +31,7 @@ public class SweepRecorder implements CameraRig.FrameSink {
     public final float target;
     public final ArrayList<Frame> frames = new ArrayList<Frame>();
     private final Listener listener;
-    private final int maxFrames;
+    private int maxFrames;
     private final long maxMs;
     private static final long MIN_MS = 350;
     private final boolean orbit;
@@ -56,14 +56,32 @@ public class SweepRecorder implements CameraRig.FrameSink {
         target = targetFactor * Math.max(w, h); // 0.02 -> ~26px at 1280: a pleasant wiggle without tearing
         subjX = subj0X = clamp(focusX / 4f, 20, TW - 21);
         subjY = subj0Y = clamp(focusY / 4f, 20, TH - 21);
+        // Memory budget: each stored frame is W*H*1.5 bytes (+thumbs). Never plan to use more than
+        // half of what the heap still has free, so a long sweep can't run the app out of memory.
+        Runtime rt = Runtime.getRuntime();
+        long free = rt.maxMemory() - (rt.totalMemory() - rt.freeMemory());
+        long perFrame = (long) (w * (long) h * 1.6f) + 4096;
+        long cap = (free / 2) / perFrame;
+        if (cap < maxFrames) maxFrames = (int) Math.max(8, cap);
     }
 
     private static float clamp(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
     public boolean isDone() { return done; }
 
-    @Override public void onFrame(Image img) {
+    @Override public synchronized void onFrame(Image img) {
         if (done) return;
+        try {
+            process(img);
+        } catch (OutOfMemoryError oom) {
+            // Free a little headroom and finish with what we have instead of crashing.
+            for (int i = 0; i < 3 && frames.size() > 4; i++) frames.remove(frames.size() - 1);
+            done = true;
+            if (frames.size() >= 4) listener.onSweepDone(this);
+        }
+    }
+
+    private void process(Image img) {
         if (img.getWidth() != W || img.getHeight() != H) return;
         Frame f = new Frame();
         f.y = new byte[W * H];
@@ -139,5 +157,6 @@ public class SweepRecorder implements CameraRig.FrameSink {
         }
     }
 
-    public void release() { frames.clear(); }
+    /** Stops recording and drops the frames. Safe to call from any thread. */
+    public synchronized void release() { done = true; frames.clear(); }
 }

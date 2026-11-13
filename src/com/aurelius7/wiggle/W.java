@@ -351,6 +351,7 @@ public final class W {
             p.setLetterSpacing(0f);
         }
         @Override public boolean onTouchEvent(MotionEvent e) {
+            if (!isEnabled()) return true;
             if (e.getActionMasked() == MotionEvent.ACTION_UP) {
                 boolean o = e.getX() > getWidth() / 2f;
                 if (o != orbit) { setOrbit(o); performHapticFeedback(1); if (listener != null) listener.onMode(o); }

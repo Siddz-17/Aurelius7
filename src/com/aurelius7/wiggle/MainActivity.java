@@ -8,7 +8,6 @@ import android.content.ContentValues;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
-import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Bitmap;
@@ -155,6 +154,14 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     private int viewerPos;
     private volatile boolean rollBusy;
     private boolean front, screenLightOn, mirrorSelfie;
+    private boolean sysMirror, permAsked, permHint;
+    private int mirrorProbe, camRetries;
+    private final java.util.HashMap<String, Bitmap> thumbCache = new java.util.HashMap<String, Bitmap>();
+
+    /** Background work that must never crash the app if the activity is already gone. */
+    private void bgRun(Runnable r) {
+        try { worker.execute(r); } catch (java.util.concurrent.RejectedExecutionException ignored) {}
+    }
     private W.ScreenLight screenLight;
     private W.IconBtn flipBtn;
 
@@ -196,7 +203,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         show(prefs.getBoolean("onboarded", false) ? cameraScreen : welcomeScreen);
 
         checkForUpdate();
-        handleInstallIntent(getIntent());
+        InstallReceiver.host = new java.lang.ref.WeakReference<MainActivity>(this);
         showUpdatedStampIfNeeded();
         loadGallery();
     }
@@ -295,7 +302,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         final Bitmap src;
         try { src = texture.getBitmap(bw, bh); } catch (Exception e) { scheduleFaceAim(); return; }
         if (src == null) { scheduleFaceAim(); return; }
-        worker.execute(new Runnable() { @Override public void run() {
+        bgRun(new Runnable() { @Override public void run() {
             float[] hit = null;
             try {
                 Bitmap b565 = src.copy(Bitmap.Config.RGB_565, false);
@@ -317,7 +324,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
             final float[] fh = hit;
             ui.post(new Runnable() { @Override public void run() {
                 if (fh != null && state == ST_PREVIEW && SystemClock.uptimeMillis() - lastManualAim >= 5000) {
-                    float fx = mirrored() ? 1f - fh[0] : fh[0];
+                    float fx = flipPreview() ? 1f - fh[0] : fh[0];
                     float u = 0.5f + (fx - 0.5f) * scaleX, v = 0.5f + (fh[1] - 0.5f) * scaleY;
                     brackets.u = Math.max(0.12f, Math.min(0.88f, u));
                     brackets.v = Math.max(0.16f, Math.min(0.78f, v));
@@ -503,7 +510,13 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         vp.addView(top, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP));
 
         infoPill = pill("", W.IC_NONE, W.Pill.SOLID, 11, false);
-        infoPill.setClickable(false);
+        infoPill.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            if (!permHint) return;
+            try {
+                startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.fromParts("package", getPackageName(), null)));
+            } catch (Exception ignored) {}
+        }});
         infoPill.setVisibility(View.GONE);
         FrameLayout.LayoutParams ilp = new FrameLayout.LayoutParams(-2, dp(28), Gravity.TOP | Gravity.CENTER_HORIZONTAL);
         ilp.topMargin = dp(66);
@@ -592,6 +605,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     private final Runnable hideInfo = new Runnable() { @Override public void run() { infoPill.setVisibility(View.GONE); } };
 
     private void flashInfo(String t) {
+        if (permHint) return;   // the permission hint stays up until access is granted
         infoPill.setText(t);
         infoPill.setVisibility(View.VISIBLE);
         ui.removeCallbacks(hideInfo);
@@ -831,12 +845,26 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
 
     private void loadGallery() {
         final ContentResolver cr = getContentResolver();
-        worker.execute(new Runnable() { @Override public void run() {
+        bgRun(new Runnable() { @Override public void run() {
             final List<Item> items = new ArrayList<Item>();
-            queryInto(cr, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "Pictures/Aurelius7%", items);
-            queryInto(cr, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "Movies/Aurelius7%", items);
+            boolean ok = queryInto(cr, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "Pictures/Aurelius7%", items);
+            ok &= queryInto(cr, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "Movies/Aurelius7%", items);
             Collections.sort(items, new Comparator<Item>() { @Override public int compare(Item a, Item b) { return Long.compare(b.date, a.date); } });
-            for (Item it : items) it.thumb = loadThumb(cr, it);
+            // Thumbnails are cached and only decoded for the newest 150, so a big library stays fast and small.
+            java.util.HashSet<String> live = new java.util.HashSet<String>();
+            java.util.HashSet<String> names = new java.util.HashSet<String>();
+            int idx = 0;
+            for (Item it : items) {
+                if (it.name != null) names.add(it.name.replaceAll("\\.(gif|mp4|png)$", ""));
+                if (idx++ >= 150) continue;
+                String key = it.uri.toString();
+                live.add(key);
+                Bitmap t = thumbCache.get(key);
+                if (t == null) { t = loadThumb(cr, it); if (t != null) thumbCache.put(key, t); }
+                it.thumb = t;
+            }
+            thumbCache.keySet().retainAll(live);
+            if (ok) pruneSidecars(names);
             ui.post(new Runnable() { @Override public void run() {
                 galleryItems = items;
                 if (!items.isEmpty() && items.get(0).thumb != null && outFrames == null) thumb.setBitmap(items.get(0).thumb);
@@ -846,12 +874,32 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         }});
     }
 
-    private void queryInto(ContentResolver cr, Uri coll, String pathLike, List<Item> out) {
+    /** Deletes the private 4-view copies of wiggles the user has since removed from their gallery. */
+    private void pruneSidecars(java.util.Set<String> liveNames) {
+        try {
+            File[] dirs = new File(getFilesDir(), "wiggles").listFiles();
+            if (dirs == null) return;
+            long now = System.currentTimeMillis();
+            for (File d : dirs) {
+                if (liveNames.contains(d.getName())) continue;
+                if (now - d.lastModified() < 10 * 60 * 1000L) continue;   // may belong to an export in flight
+                Store.deleteDir(d);
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private static String tagOf(Item it) {
+        if (it.mime == null) return "GIF";
+        if (it.mime.startsWith("video")) return "MP4";
+        return it.mime.contains("png") ? "PRINT" : "GIF";
+    }
+
+    private boolean queryInto(ContentResolver cr, Uri coll, String pathLike, List<Item> out) {
         Cursor c = null;
         try {
             c = cr.query(coll, new String[]{"_id", "date_added", "mime_type", "_display_name"},
                     "relative_path LIKE ?", new String[]{pathLike}, null);
-            if (c == null) return;
+            if (c == null) return false;
             while (c.moveToNext()) {
                 Item it = new Item();
                 it.uri = ContentUris.withAppendedId(coll, c.getLong(0));
@@ -863,7 +911,9 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
                 if (name != null) for (String st : Develop.STOCKS) if (name.contains("_" + st.replace("-", "") + ".")) it.stock = st;
                 out.add(it);
             }
-        } catch (Exception ignored) {
+            return true;
+        } catch (Exception e) {
+            return false;
         } finally { if (c != null) c.close(); }
     }
 
@@ -895,7 +945,8 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         final List<Item> list = new ArrayList<Item>();
         for (Item it : galleryItems) {
             boolean vid = it.mime != null && it.mime.startsWith("video");
-            if (galFilter == 0 || (galFilter == 1 && !vid) || (galFilter == 2 && vid)) list.add(it);
+            boolean gif = !vid && !"PRINT".equals(tagOf(it));
+            if (galFilter == 0 || (galFilter == 1 && gif) || (galFilter == 2 && vid)) list.add(it);
         }
         galCount.setText(galleryItems.size() + " EXP");
         int rolled = Store.rollShots(this).size();
@@ -916,7 +967,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
             st.set(n, stock, df.format(new Date(first.date * 1000)).toUpperCase(Locale.US));
             for (int k = 0; k < n; k++) {
                 Item it = list.get(i + k);
-                st.setThumb(k, it.thumb, it.mime != null && it.mime.startsWith("video") ? "MP4" : "GIF");
+                st.setThumb(k, it.thumb, tagOf(it));
             }
             st.listener = new W.Strip.OnPick() { @Override public void onPick(int k) {
                 Item it = list.get(base + k);
@@ -1086,8 +1137,11 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         super.onResume();
         resumed = true;
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{Manifest.permission.CAMERA}, 7);
-        } else maybeStartCamera();
+            // Ask once per launch. Asking on every resume re-opened the dialog forever after a denial.
+            if (!permAsked) { permAsked = true; requestPermissions(new String[]{Manifest.permission.CAMERA}, 7); }
+            else showPermHint();
+        } else { hidePermHint(); maybeStartCamera(); }
+        onInstallConfirmReady();
         if (state == ST_RESULT && !tiltRes) startLoop();
         updateSensors();
         if (currentScreen == cameraScreen) scheduleFaceAim();
@@ -1122,11 +1176,12 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         stopLoop();
         stopTimer();
         if (state == ST_CAPTURE || state == ST_PROCESS) {
-            if (recorder != null) recorder.release();
+            // Mid-sweep: drop it. Mid-build: the builder thread owns the frames and releases them itself.
+            if (state == ST_CAPTURE && recorder != null) recorder.release();
             recorder = null;
             setPreviewState();
         }
-        if (cam != null) { cam.stop(); cam = null; }
+        if (cam != null) { cam.sink = null; cam.stop(); cam = null; }
         torchOn = false;
         screenLight(false);
         cameraStarted = false;
@@ -1134,8 +1189,22 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     }
 
     @Override public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
-        if (code == 7 && res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) maybeStartCamera();
-        else flashInfo("Camera permission needed · enable it in Settings");
+        if (code != 7) return;
+        if (res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) { hidePermHint(); maybeStartCamera(); }
+        else showPermHint();
+    }
+
+    private void showPermHint() {
+        permHint = true;
+        ui.removeCallbacks(hideInfo);
+        infoPill.setText("Camera access needed \u00B7 tap to open Settings");
+        infoPill.setVisibility(View.VISIBLE);
+    }
+
+    private void hidePermHint() {
+        if (!permHint) return;
+        permHint = false;
+        infoPill.setVisibility(View.GONE);
     }
 
     private void maybeStartCamera() {
@@ -1145,9 +1214,12 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         cam.start();
     }
 
-    @Override public void onCameraReady(final int w, final int h, final int orient) {
+    @Override public void onCameraReady(final CameraRig rig, final int w, final int h, final int orient) {
         runOnUiThread(new Runnable() { @Override public void run() {
+            if (rig != cam) return;            // a rig that was already replaced (flip / pause)
             cameraStarted = true;
+            camRetries = 0;
+            mirrorProbe = 45;
             boolean swap = orient == 90 || orient == 270;
             contentAspect = swap ? h / (float) w : w / (float) h;
             applyTransform();
@@ -1162,18 +1234,55 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         if (va < contentAspect) { scaleX = (vh * contentAspect) / vw; scaleY = 1; }
         else { scaleX = 1; scaleY = (vw / contentAspect) / vh; }
         Matrix m = new Matrix();
-        m.setScale(mirrored() ? -scaleX : scaleX, scaleY, vw / 2f, vh / 2f);
+        m.setScale(flipPreview() ? -scaleX : scaleX, scaleY, vw / 2f, vh / 2f);
         texture.setTransform(m);
     }
 
-    @Override public void onCameraError(final String msg) {
-        runOnUiThread(new Runnable() { @Override public void run() { flashInfo(msg); }});
+    @Override public void onCameraError(final CameraRig rig, final String msg) {
+        runOnUiThread(new Runnable() { @Override public void run() {
+            if (rig != cam) return;
+            if (state == ST_CAPTURE) abortSweep(null);
+            cameraStarted = false;
+            shutter.setEnabled(false);
+            cam.stop(); cam = null;
+            if (front && msg.startsWith("No selfie")) { front = false; put("front", false); flashInfo(msg); maybeStartCamera(); return; }
+            flashInfo(msg);
+            // Another app may have grabbed the camera for a moment: retry a couple of times.
+            if (camRetries++ < 2) ui.postDelayed(new Runnable() { @Override public void run() { maybeStartCamera(); } }, 1500);
+        }});
+    }
+
+    /** Whether we must flip the preview ourselves so that what is shown matches the mirror setting. */
+    private boolean flipPreview() { return sysMirror != mirrored(); }
+
+    private void abortSweep(String why) {
+        SweepRecorder r = recorder;
+        recorder = null;
+        if (cam != null) { cam.sink = null; cam.unlock(); if (torchOn) cam.setTorch(false); }
+        torchOn = false;
+        screenLight(false);
+        if (r != null) r.release();
+        setPreviewState();
+        if (why != null) flashInfo(why);
+        scheduleFaceAim();
     }
 
     @Override public void onSurfaceTextureAvailable(SurfaceTexture s, int w, int h) { surfaceReady = true; maybeStartCamera(); }
     @Override public void onSurfaceTextureSizeChanged(SurfaceTexture s, int w, int h) { applyTransform(); }
     @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture s) { surfaceReady = false; return true; }
-    @Override public void onSurfaceTextureUpdated(SurfaceTexture s) {}
+    @Override public void onSurfaceTextureUpdated(SurfaceTexture s) {
+        // Some phones mirror the front-camera preview at the system level. Detect it from the texture
+        // transform (a horizontal flip changes the sign of its determinant) so the preview, the focus
+        // point and the saved wiggle all agree with the "Mirror selfies" setting on every device.
+        if (mirrorProbe <= 0) return;
+        mirrorProbe--;
+        try {
+            float[] m = new float[16];
+            s.getTransformMatrix(m);
+            boolean mir = m[0] * m[5] - m[4] * m[1] > 0;
+            if (mir != sysMirror) { sysMirror = mir; applyTransform(); }
+        } catch (Exception ignored) {}
+    }
 
     // ================================================================= selfie camera
     /** True view by default; mirror only if the user turned on "Mirror selfies". */
@@ -1263,6 +1372,11 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         ui.postDelayed(new Runnable() { @Override public void run() {
             if (state == ST_CAPTURE && recorder == r && cam != null) cam.sink = r;
         }}, (torchOn || screenLightOn) ? 600 : 180);
+        // Watchdog: the sweep normally ends itself from the frame callback. If frames stop arriving
+        // (camera taken by another app, driver hiccup) it would otherwise hang on "recording" forever.
+        ui.postDelayed(new Runnable() { @Override public void run() {
+            if (state == ST_CAPTURE && recorder == r && !r.isDone()) abortSweep("Camera stopped responding, try again");
+        }}, (orbit ? 3400 : 2600) + 2600);
     }
 
     private final Runnable timerTick = new Runnable() { @Override public void run() {
@@ -1455,8 +1569,10 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     private void refocus(float bx, float by) {
         if (composer == null || state != ST_RESULT) return;
         float u = (composer.cropX + bx) / composer.W, v = (composer.cropY + by) / composer.H;
-        composer.align(u, v);
-        baseFrames = composer.render();
+        try {
+            composer.align(u, v);
+            baseFrames = composer.render();
+        } catch (Throwable t) { return; }
         syncStageFocus();
         markDirty();
         develop();
@@ -1468,7 +1584,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         final Bitmap[] base = baseFrames;
         final int stock = resStock, gr = grain;
         final boolean stamp = dateStamp;
-        worker.execute(new Runnable() { @Override public void run() {
+        bgRun(new Runnable() { @Override public void run() {
             if (gen != devGen) return;
             final Bitmap[] dev = Develop.apply(base, stock, gr, stamp, W.DOT);
             ui.post(new Runnable() { @Override public void run() {
@@ -1730,8 +1846,9 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         Intent i = new Intent(Intent.ACTION_SEND);
         i.setType(mime);
         i.putExtra(Intent.EXTRA_STREAM, uri);
+        i.setClipData(android.content.ClipData.newRawUri("wiggle", uri));
         i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        startActivity(Intent.createChooser(i, "Share wiggle"));
+        try { startActivity(Intent.createChooser(i, "Share wiggle")); } catch (Exception ignored) {}
     }
 
     private void showStamp(String t) {
@@ -1808,22 +1925,25 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         if (intent != null && ACTION_CAMERA.equals(intent.getAction()) && state == ST_PREVIEW && prefs.getBoolean("onboarded", false)) show(cameraScreen);
-        handleInstallIntent(intent);
     }
 
-    private void handleInstallIntent(Intent intent) {
-        if (intent == null || !Updater.ACTION_STATUS.equals(intent.getAction())) return;
-        int status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, -999);
-        if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
-            Intent confirm = (Intent) intent.getParcelableExtra(Intent.EXTRA_INTENT);
-            if (confirm != null) {
-                confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                try { startActivity(confirm); } catch (Exception ignored) {}
-            }
-        } else if (status != PackageInstaller.STATUS_SUCCESS) {
+    /** Called by InstallReceiver (any thread) and from onResume: show Android's install confirmation. */
+    void onInstallConfirmReady() {
+        runOnUiThread(new Runnable() { @Override public void run() {
+            if (!resumed) return;                       // shown on the next resume instead
+            Intent confirm = InstallReceiver.pendingConfirm;
+            if (confirm == null) return;
+            InstallReceiver.pendingConfirm = null;
+            confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            try { startActivity(confirm); } catch (Exception e) { onInstallFailed(); }
+        }});
+    }
+
+    void onInstallFailed() {
+        runOnUiThread(new Runnable() { @Override public void run() {
             updating = false;
             updatePill.setEnabled(true);
-            updatePill.setText("Install cancelled · retry");
-        }
+            updatePill.setText("Install cancelled, tap to retry");
+        }});
     }
 }
