@@ -746,4 +746,85 @@ public final class W {
             return true;
         }
     }
+
+    // ---------------------------------------------------------------------------------- Retro camera HUD
+    /** Orange dot-matrix camera readout: corner marks, mode/stock line, date-time stamp, battery, blinking REC. */
+    public static class RetroHud extends View {
+        public String mode = "SLIDE", flash = "OFF", stock = "STD";
+        public boolean rec;
+        public long recStart;
+        public int exp;
+        private float battery = 1f;
+        private long lastBat;
+        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final java.text.SimpleDateFormat fmt = new java.text.SimpleDateFormat("''yy MM dd   HH:mm", java.util.Locale.US);
+        public RetroHud(Context c) { super(c); setClickable(false); }
+
+        private void readBattery() {
+            long now = System.currentTimeMillis();
+            if (now - lastBat < 30000) return;
+            lastBat = now;
+            try {
+                android.content.Intent i = getContext().registerReceiver(null,
+                        new android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED));
+                if (i != null) {
+                    int lv = i.getIntExtra("level", -1), sc = i.getIntExtra("scale", 100);
+                    if (lv >= 0 && sc > 0) battery = lv / (float) sc;
+                }
+            } catch (Exception ignored) {}
+        }
+
+        private void glowText(Canvas c, String t, float x, float y, float size, Paint.Align al, int col) {
+            p.setTypeface(DOT); p.setTextSize(size); p.setTextAlign(al);
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(EDGE); p.setShadowLayer(size * 0.5f, 0, 0, 0xCCE8873A);
+            c.drawText(t, x, y, p);
+            p.setShadowLayer(0, 0, 0, 0);
+            p.setColor(col);
+            c.drawText(t, x, y, p);
+        }
+
+        @Override protected void onDraw(Canvas c) {
+            Context ctx = getContext();
+            float w = getWidth(), h = getHeight(), m = dp(ctx, 16), len = dp(ctx, 22);
+            readBattery();
+            // viewfinder corner marks
+            p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(dp(ctx, 2)); p.setStrokeCap(Paint.Cap.SQUARE);
+            p.setColor(0xCCFFB27A);
+            float top = dp(ctx, 74), bot = h - dp(ctx, 72);
+            c.drawLine(m, top, m + len, top, p); c.drawLine(m, top, m, top + len, p);
+            c.drawLine(w - m, top, w - m - len, top, p); c.drawLine(w - m, top, w - m, top + len, p);
+            c.drawLine(m, bot, m + len, bot, p); c.drawLine(m, bot, m, bot - len, p);
+            c.drawLine(w - m, bot, w - m - len, bot, p); c.drawLine(w - m, bot, w - m, bot - len, p);
+            // centre cross
+            float cx = w / 2, cy = (top + bot) / 2, cr = dp(ctx, 7);
+            p.setStrokeWidth(dp(ctx, 1.2f)); p.setColor(0x99FFB27A);
+            c.drawLine(cx - cr, cy, cx + cr, cy, p); c.drawLine(cx, cy - cr, cx, cy + cr, p);
+            // top centre: REC timer or battery + exposure counter
+            float ty = top + dp(ctx, 10);
+            if (rec) {
+                boolean on = ((System.currentTimeMillis() / 500) & 1) == 0;
+                long sec = Math.max(0, (android.os.SystemClock.elapsedRealtime() - recStart) / 1000);
+                p.setStyle(Paint.Style.FILL);
+                if (on) { p.setColor(REC); c.drawCircle(cx - dp(ctx, 34), ty, dp(ctx, 5), p); }
+                glowText(c, "REC 00:" + (sec < 10 ? "0" : "") + sec, cx - dp(ctx, 22), ty + dp(ctx, 5), dp(ctx, 14), Paint.Align.LEFT, 0xFFFFD3AE);
+                postInvalidateDelayed(250);
+            } else {
+                float bw = dp(ctx, 22), bh = dp(ctx, 10), bx = cx - dp(ctx, 52), by = ty - bh / 2;
+                p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(dp(ctx, 1.4f)); p.setColor(0xFFFFB27A);
+                c.drawRect(bx, by, bx + bw, by + bh, p);
+                p.setStyle(Paint.Style.FILL);
+                c.drawRect(bx + bw, by + bh * 0.3f, bx + bw + dp(ctx, 2.5f), by + bh * 0.7f, p);
+                p.setColor(battery < 0.2f ? REC : 0xFFFFB27A);
+                c.drawRect(bx + dp(ctx, 2), by + dp(ctx, 2), bx + dp(ctx, 2) + (bw - dp(ctx, 4)) * Math.max(0.08f, battery), by + bh - dp(ctx, 2), p);
+                glowText(c, "EXP " + (exp < 10 ? "0" : "") + exp, bx + bw + dp(ctx, 12), ty + dp(ctx, 5), dp(ctx, 13), Paint.Align.LEFT, 0xFFFFD3AE);
+                postInvalidateDelayed(30000);
+            }
+            // bottom line: mode / flash / stock, and the date-time stamp
+            float by2 = bot - dp(ctx, 12);
+            glowText(c, mode + " · " + stock, m, by2, dp(ctx, 12), Paint.Align.LEFT, 0xFFFFD3AE);
+            glowText(c, fmt.format(new java.util.Date()), w - m, by2, dp(ctx, 14), Paint.Align.RIGHT, 0xFFFFD3AE);
+            glowText(c, "FLASH " + flash, m, by2 - dp(ctx, 20), dp(ctx, 11), Paint.Align.LEFT, 0xFFFFB27A);
+        }
+    }
 }

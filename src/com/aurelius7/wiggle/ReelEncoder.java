@@ -6,6 +6,7 @@ import android.graphics.Paint;
 import android.graphics.Rect;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
+import android.media.MediaExtractor;
 import android.media.MediaFormat;
 import android.media.MediaMuxer;
 import android.view.Surface;
@@ -26,6 +27,9 @@ public final class ReelEncoder {
     private long tUs;
     private int track = -1, written;
     private boolean started, closed;
+    private MediaExtractor ax;
+    private MediaFormat audioFmt;
+    private int muxAudio = -1;
 
     public ReelEncoder(File out, int w, int h) throws Exception {
         MediaFormat fmt = MediaFormat.createVideoFormat("video/avc", w, h);
@@ -49,6 +53,40 @@ public final class ReelEncoder {
         enc = e; mux = m; in = s;
     }
 
+    /** Optional soundtrack. Only AAC (.m4a/.aac/.mp4 audio) can be copied into the MP4; returns false otherwise. */
+    public boolean setAudio(android.content.Context ctx, android.net.Uri uri) {
+        MediaExtractor ex = null;
+        try {
+            ex = new MediaExtractor();
+            ex.setDataSource(ctx, uri, null);
+            for (int i = 0; i < ex.getTrackCount(); i++) {
+                MediaFormat f = ex.getTrackFormat(i);
+                String mime = f.getString(MediaFormat.KEY_MIME);
+                if ("audio/mp4a-latm".equals(mime)) { ex.selectTrack(i); ax = ex; audioFmt = f; return true; }
+            }
+        } catch (Exception ignored) {}
+        if (ex != null) ex.release();
+        return false;
+    }
+
+    private void writeAudio() {
+        if (ax == null || muxAudio < 0 || !started) return;
+        try {
+            ByteBuffer buf = ByteBuffer.allocate(1 << 18);
+            MediaCodec.BufferInfo bi = new MediaCodec.BufferInfo();
+            while (true) {
+                buf.clear();
+                int n = ax.readSampleData(buf, 0);
+                if (n < 0) break;
+                long t = ax.getSampleTime();
+                if (t > tUs) break;
+                bi.set(0, n, t, (ax.getSampleFlags() & MediaExtractor.SAMPLE_FLAG_SYNC) != 0 ? MediaCodec.BUFFER_FLAG_KEY_FRAME : 0);
+                mux.writeSampleData(muxAudio, buf, bi);
+                ax.advance();
+            }
+        } catch (Exception ignored) {}
+    }
+
     /** Show this bitmap for holdMs milliseconds. */
     public void add(Bitmap b, int holdMs) {
         Canvas c = in.lockHardwareCanvas();
@@ -68,12 +106,14 @@ public final class ReelEncoder {
             enc.signalEndOfInputStream();
             drain(true);
             if (!started || written == 0) throw new RuntimeException("Video encoder produced no frames");
+            writeAudio();
         } finally { close(); }
     }
 
     public void close() {
         if (closed) return;
         closed = true;
+        if (ax != null) { try { ax.release(); } catch (Exception ignored) {} }
         try { enc.stop(); } catch (Exception ignored) {}
         enc.release();
         in.release();
@@ -89,6 +129,7 @@ public final class ReelEncoder {
                 if (!eos || System.currentTimeMillis() > deadline) return;
             } else if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 track = mux.addTrack(enc.getOutputFormat());
+                if (audioFmt != null) { try { muxAudio = mux.addTrack(audioFmt); } catch (Exception ex) { muxAudio = -1; } }
                 mux.start();
                 started = true;
             } else if (idx >= 0) {

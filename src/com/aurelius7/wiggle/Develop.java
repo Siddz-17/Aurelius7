@@ -267,6 +267,11 @@ public final class Develop {
         b.setPixels(px, 0, w, 0, 0, w, h);
     }
 
+    /** Orange date stamp onto an existing (mutable) bitmap. */
+    public static void stamp(Bitmap b, String text, android.graphics.Typeface dot) {
+        drawStamp(new Canvas(b), b.getWidth(), b.getHeight(), text, dot);
+    }
+
     private static void drawStamp(Canvas c, int w, int h, String text, android.graphics.Typeface dot) {
         Paint tp = new Paint(Paint.ANTI_ALIAS_FLAG);
         if (dot != null) tp.setTypeface(dot);

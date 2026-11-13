@@ -168,10 +168,30 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     }
     private W.ScreenLight screenLight;
     private ReelEditor editor;
+    private W.RetroHud retroHud;
+    private LinearLayout ctrPanel;
+    private boolean retro;
     private View editorScreen;
 
     boolean isShowing(View v) { return currentScreen == v; }
     void showGallery() { show(galleryScreen); }
+
+    static final int REQ_MUSIC = 7711;
+    void pickMusic() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("audio/*");
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        try { startActivityForResult(i, REQ_MUSIC); } catch (Exception ignored) {}
+    }
+
+    @Override protected void onActivityResult(int req, int res, Intent data) {
+        if (req == REQ_MUSIC && res == RESULT_OK && data != null && data.getData() != null && editor != null) {
+            editor.onMusic(data.getData());
+            return;
+        }
+        super.onActivityResult(req, res, data);
+    }
 
     void openEditor() {
         if (editor == null) {
@@ -245,6 +265,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         borderOn = prefs.getBoolean("border", false);
         front = prefs.getBoolean("front", false);
         mirrorSelfie = prefs.getBoolean("mirrorSelfie", false);
+        retro = prefs.getBoolean("retro", true);
     }
 
     void put(String k, int v) { prefs.edit().putInt(k, v).apply(); }
@@ -502,6 +523,8 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         brackets = new W.Brackets(this);
         brackets.listener = new W.Brackets.OnFocus() { @Override public void onFocus(float u, float v) { lastManualAim = SystemClock.uptimeMillis(); } };
         vp.addView(brackets, new FrameLayout.LayoutParams(-1, -1));
+        retroHud = new W.RetroHud(this);
+        vp.addView(retroHud, new FrameLayout.LayoutParams(-1, -1));
 
         LinearLayout top = row();
         top.setPadding(dp(14), dp(14), dp(14), 0);
@@ -574,6 +597,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         vp.addView(hud, hlp);
 
         LinearLayout ctr = col();
+        ctrPanel = ctr;
         ctr.setPadding(dp(20), dp(14), dp(20), dp(18));
         dial = new W.ModeDial(this);
         dial.setOrbit(orbit);
@@ -612,15 +636,42 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         ctr.addView(camHint, hl);
         s.addView(ctr, lp(-1, -2));
         updateCamHint();
+        applyRetro();
         return s;
     }
 
+    /** Retro skin: orange camera readout over the viewfinder + a darker "camera body" under it. */
+    private void applyRetro() {
+        if (retroHud == null || ctrPanel == null) return;
+        retroHud.setVisibility(retro ? View.VISIBLE : View.GONE);
+        if (retro) {
+            GradientDrawable body = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, new int[]{0xFF26231E, 0xFF0F0E0C});
+            body.setStroke(dp(1), 0x33FFB27A);
+            ctrPanel.setBackground(body);
+        } else ctrPanel.setBackgroundColor(W.BG);
+        updateHud();
+    }
+
+    void updateHud() {
+        if (retroHud == null) return;
+        retroHud.mode = orbit ? "ORBIT" : "SLIDE";
+        retroHud.flash = FLASH_NAMES[flashIdx].toUpperCase(Locale.US);
+        retroHud.stock = Develop.STOCKS[liveStock];
+        retroHud.exp = rollMode ? Store.rollShots(this).size() : galleryItems.size();
+        boolean rec = state == ST_CAPTURE;
+        if (rec && !retroHud.rec) retroHud.recStart = SystemClock.elapsedRealtime();
+        retroHud.rec = rec;
+        retroHud.invalidate();
+    }
+
     private void updateCamHint() {
+        updateHud();
         camHint.setText(orbit ? "Curve around your subject · keep it in the brackets"
                 : "Slide 3–5 cm sideways · don’t just turn");
     }
 
     private void updateFlashPill() {
+        updateHud();
         flashPill.setIcon(W.IC_FLASH);
         flashPill.setText(FLASH_NAMES[flashIdx]);
         flashPill.setSel(flashIdx == 2);
@@ -639,6 +690,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     private void applyLiveStock() {
         for (int i = 0; i < camStocks.length; i++) { camStocks[i].setSel(i == liveStock); if (setStocks[i] != null) setStocks[i].setSel(i == liveStock); }
         scrollTo(camStockRow, camStocks[liveStock]);
+        updateHud();
         if (setStockScroll != null) scrollTo(setStockScroll, setStocks[liveStock]);
         Paint lp = new Paint();
         lp.setColorFilter(new ColorMatrixColorFilter(Develop.matrix(liveStock)));
@@ -656,6 +708,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
 
     private void setPreviewState() {
         state = ST_PREVIEW;
+        updateHud();
         stopLoop();
         stopTimer();
         brackets.show = true; brackets.setEnabled(true); brackets.invalidate();
@@ -925,6 +978,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
             if (ok) pruneSidecars(names);
             ui.post(new Runnable() { @Override public void run() {
                 galleryItems = items;
+                updateHud();
                 if (!items.isEmpty() && items.get(0).thumb != null && outFrames == null) thumb.setBitmap(items.get(0).thumb);
                 if (state == ST_PREVIEW) updateExp();
                 renderStrips();
@@ -1070,6 +1124,10 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         dep.listener = new W.Segmented.OnPick() { @Override public void onPick(int i) {
             depthIdx = i; put("depth", i); depthKnob.setValue(DEPTH_NAMES[i]); }};
         setRow(g, "Depth", "How far to move before it stops", dep, false);
+        W.Toggle rtg = new W.Toggle(this, retro);
+        rtg.setContentDescription("Retro camera readout");
+        rtg.listener = new W.Toggle.OnToggle() { @Override public void onToggle(boolean on) { retro = on; put("retro", on); applyRetro(); } };
+        setRow(g, "Retro camera look", "Orange dot-matrix readout, date stamp and camera-body panel", rtg, false);
         W.Toggle hap = new W.Toggle(this, haptics);
         hap.setContentDescription("Haptic ticks");
         hap.listener = new W.Toggle.OnToggle() { @Override public void onToggle(boolean on) { haptics = on; put("haptics", on); } };
@@ -1414,6 +1472,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     private void startSweep() {
         if (state != ST_PREVIEW || cam == null || !cameraStarted) return;
         state = ST_CAPTURE;
+        updateHud();
         float[] fc = focusContent();
         shotU = fc[0]; shotV = fc[1];
         float[] fs = contentToSensor(mirrored() ? 1f - shotU : shotU, shotV);

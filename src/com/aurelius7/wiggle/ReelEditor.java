@@ -1,5 +1,8 @@
 package com.aurelius7.wiggle;
 
+import android.app.AlertDialog;
+import android.widget.EditText;
+import android.database.Cursor;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.graphics.Bitmap;
@@ -43,7 +46,7 @@ import java.util.Locale;
  */
 public final class ReelEditor {
     private static final class Clip {
-        File dir; String name; Bitmap thumb; int loops = 2, fps = 9;
+        File dir; String name; Bitmap thumb; int loops = 2, fps = 9, capPos = 2; String caption = "";
     }
 
     private final MainActivity a;
@@ -57,7 +60,12 @@ public final class ReelEditor {
     private W.Pill[] stockPills;
     private HorizontalScrollView stockScroll;
     private W.Segmented transSeg, ratioSeg;
-    private W.Pill exportBtn, shareBtn, moveL, moveR, removeBtn;
+    private W.Pill exportBtn, shareBtn, moveL, moveR, removeBtn, playBtn, dupBtn, capBtn, capPosBtn, dateBtn, musicBtn;
+    private TextView capView;
+    private boolean playing, dateStamp, musicSkipped;
+    private int playIdx;
+    private Uri music;
+    private String musicName = "";
     private FrameLayout picker;
     private LinearLayout pickGrid;
 
@@ -93,6 +101,9 @@ public final class ReelEditor {
         tc.addView(sub, sl);
         LinearLayout.LayoutParams tcl = new LinearLayout.LayoutParams(0, -2, 1); tcl.leftMargin = dp(12);
         head.addView(tc, tcl);
+        playBtn = a.pill("\u25B6 Play", W.IC_NONE, W.Pill.GHOST, 13, false);
+        playBtn.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { togglePlay(); } });
+        head.addView(playBtn, a.lp(-2, dp(36)));
         s.addView(head);
 
         FrameLayout pf = new FrameLayout(a);
@@ -104,6 +115,11 @@ public final class ReelEditor {
         emptyHint.setGravity(Gravity.CENTER);
         emptyHint.setLineSpacing(0, 1.4f);
         pf.addView(emptyHint, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
+        capView = a.text("", 18, 0xFFFFD3AE, W.DOT);
+        capView.setShadowLayer(dp(8), 0, 0, 0xCCE8873A);
+        capView.setGravity(Gravity.CENTER);
+        capView.setVisibility(View.GONE);
+        pf.addView(capView, new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL));
         LinearLayout.LayoutParams pfl = new LinearLayout.LayoutParams(-1, 0, 1);
         pfl.topMargin = dp(12);
         s.addView(pf, pfl);
@@ -138,6 +154,22 @@ public final class ReelEditor {
         LinearLayout.LayoutParams m3 = a.lpw(dp(34), 1); m3.leftMargin = dp(8);
         acts.addView(removeBtn, m3);
         c.addView(acts, a.lp(-1, -2));
+
+        LinearLayout acts2 = a.row();
+        dupBtn = a.pill("Duplicate", W.IC_NONE, W.Pill.GHOST, 12, false);
+        capBtn = a.pill("Caption", W.IC_NONE, W.Pill.GHOST, 12, false);
+        capPosBtn = a.pill("Text: BOTTOM", W.IC_NONE, W.Pill.GHOST, 12, false);
+        dupBtn.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { duplicate(); } });
+        capBtn.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { editCaption(); } });
+        capPosBtn.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            Clip k = cur(); if (k == null) return; k.capPos = (k.capPos + 1) % 3; persist(); syncCaption(); }});
+        acts2.addView(dupBtn, a.lpw(dp(34), 1));
+        LinearLayout.LayoutParams n2 = a.lpw(dp(34), 1); n2.leftMargin = dp(8);
+        acts2.addView(capBtn, n2);
+        LinearLayout.LayoutParams n3 = a.lpw(dp(34), 1.2f); n3.leftMargin = dp(8);
+        acts2.addView(capPosBtn, n3);
+        LinearLayout.LayoutParams a2l = a.lp(-1, -2); a2l.topMargin = dp(8);
+        c.addView(acts2, a2l);
 
         loopsVal = a.text("2", 12, W.TXT, W.DOT);
         loopsSl = slider(c, "Loops", loopsVal, new W.Slider.OnChange() { @Override public void onChange(float v, boolean done) {
@@ -184,6 +216,22 @@ public final class ReelEditor {
         LinearLayout.LayoutParams rl = new LinearLayout.LayoutParams(0, -2, 1); rl.leftMargin = dp(8);
         segs.addView(ratioSeg, rl);
         c.addView(segs, a.lp(-1, -2));
+
+        c.addView(label("FINISH"));
+        LinearLayout fin = a.row();
+        dateBtn = a.pill("DATE STAMP", W.IC_NONE, W.Pill.GHOST, 11, true);
+        dateBtn.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            dateStamp = !dateStamp; dateBtn.setSel(dateStamp); persist(); }});
+        musicBtn = a.pill("+ Music", W.IC_NONE, W.Pill.GHOST, 11, true);
+        musicBtn.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            if (music != null) { music = null; musicName = ""; persist(); syncMusic(); } else a.pickMusic(); }});
+        fin.addView(dateBtn, a.lpw(dp(34), 1));
+        LinearLayout.LayoutParams f2 = a.lpw(dp(34), 1.4f); f2.leftMargin = dp(8);
+        fin.addView(musicBtn, f2);
+        c.addView(fin, a.lp(-1, -2));
+        TextView mnote = a.text("Music must be an AAC file (.m4a). It is cut at the reel's end.", 10, W.MUT, W.UI);
+        LinearLayout.LayoutParams mnl = a.lp(-2, -2); mnl.topMargin = dp(6); mnl.bottomMargin = dp(10);
+        c.addView(mnote, mnl);
 
         // --- export bar
         status = a.text("", 11, W.MUT, W.DOT);
@@ -390,10 +438,11 @@ public final class ReelEditor {
     private void persist() {
         try {
             FileWriter w = new FileWriter(new File(a.getFilesDir(), "reel.txt"));
-            try { for (Clip c : clips) w.write(c.name + "|" + c.loops + "|" + c.fps + "\n"); } finally { w.close(); }
+            try { for (Clip c : clips) w.write(c.name + "|" + c.loops + "|" + c.fps + "|" + c.capPos + "|" + c.caption.replace('|', '/').replace('\n', ' ') + "\n"); } finally { w.close(); }
         } catch (Exception ignored) {}
         a.prefs.edit().putInt("reelStock", stock).putInt("reelGrain", grain).putInt("reelStrength", strength)
-                .putInt("reelTrans", trans).putInt("reelAspect", aspect).apply();
+                .putInt("reelTrans", trans).putInt("reelAspect", aspect).putBoolean("reelDate", dateStamp)
+                .putString("reelMusic", music == null ? "" : music.toString()).putString("reelMusicName", musicName).apply();
     }
 
     private void restore() {
@@ -402,6 +451,10 @@ public final class ReelEditor {
         strength = a.prefs.getInt("reelStrength", 100);
         trans = a.prefs.getInt("reelTrans", 1);
         aspect = a.prefs.getInt("reelAspect", 0);
+        dateStamp = a.prefs.getBoolean("reelDate", false);
+        String mu = a.prefs.getString("reelMusic", "");
+        music = mu.isEmpty() ? null : Uri.parse(mu);
+        musicName = a.prefs.getString("reelMusicName", "");
         transSeg.setSel(trans); ratioSeg.setSel(aspect);
         clips.clear();
         File root = new File(a.getFilesDir(), "wiggles");
@@ -410,7 +463,7 @@ public final class ReelEditor {
             try {
                 String ln;
                 while ((ln = r.readLine()) != null) {
-                    String[] p = ln.split("\\|");
+                    String[] p = ln.split("\\|", 5);
                     if (p.length < 3 || p[0].contains("/") || p[0].contains("..")) continue;   // names only, never paths
                     File d = new File(root, p[0]);
                     if (!Store.hasFrames(d)) continue;
@@ -418,6 +471,7 @@ public final class ReelEditor {
                     k.dir = d; k.name = p[0];
                     k.loops = Math.max(1, Math.min(8, Integer.parseInt(p[1])));
                     k.fps = Math.max(4, Math.min(16, Integer.parseInt(p[2])));
+                    if (p.length >= 5) { k.capPos = Math.max(0, Math.min(2, Integer.parseInt(p[3]))); k.caption = p[4]; }
                     k.thumb = thumb(d);
                     if (k.thumb != null) clips.add(k);
                 }
@@ -429,7 +483,9 @@ public final class ReelEditor {
     // ------------------------------------------------------------------ screen state
     void onShow() {
         if (!loaded) { loaded = true; restore(); }
+        playing = false; playBtn.setText("\u25B6 Play");
         status.setText(""); shareBtn.setVisibility(View.GONE); lastUri = null;
+        dateBtn.setSel(dateStamp); syncMusic();
         refresh(true);
         syncGrade();
         refreshPreviewRatio();
@@ -437,6 +493,7 @@ public final class ReelEditor {
 
     void onBack() {
         if (exporting) return;
+        if (playing) { stopPlay(); return; }
         if (picker.getVisibility() == View.VISIBLE) { picker.setVisibility(View.GONE); return; }
         a.showGallery();
     }
@@ -462,6 +519,8 @@ public final class ReelEditor {
         boolean one = cur() != null;
         moveL.setEnabled(one && sel > 0); moveR.setEnabled(one && sel < clips.size() - 1); removeBtn.setEnabled(one);
         loopsSl.setEnabled(one); fpsSl.setEnabled(one);
+        dupBtn.setEnabled(one); capBtn.setEnabled(one); capPosBtn.setEnabled(one); playBtn.setEnabled(has);
+        syncCaption();
         if (one) {
             loopsSl.setValue((cur().loops - 1) / 7f); loopsVal.setText(String.valueOf(cur().loops));
             fpsSl.setValue((cur().fps - 4) / 12f); fpsVal.setText(cur().fps + "FPS");
@@ -493,7 +552,7 @@ public final class ReelEditor {
             b.setBackgroundColor(W.ACC);
             b.setPadding(dp(5), dp(2), dp(5), dp(2));
             card.addView(b, new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.START));
-            card.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { sel = idx; refresh(true); } });
+            card.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (playing) stopPlay(); sel = idx; refresh(true); } });
             LinearLayout.LayoutParams p = a.lp(dp(66), dp(98)); if (i > 0) p.leftMargin = dp(8);
             timeline.addView(card, p);
         }
@@ -555,23 +614,136 @@ public final class ReelEditor {
         Clip c = cur();
         if (pv == null || c == null || !a.isShowing(screen)) return;
         int[] sq = bounce() ? new int[]{0, 1, 2, 3, 2, 1} : new int[]{0, 1, 2, 3};
+        if (playing && pvPos >= c.loops * sq.length) {
+            playIdx++;
+            if (playIdx >= clips.size()) { stopPlay(); return; }
+            sel = playIdx; buildTimeline(); syncCaption(); loadPreview();
+            return;
+        }
         preview.setImageBitmap(pv[sq[pvPos % sq.length]]);
         pvPos++;
         a.ui.postDelayed(this, 1000 / c.fps);
     }};
 
+    // ------------------------------------------------------------------ editing helpers
+    private void togglePlay() {
+        if (exporting || clips.isEmpty()) return;
+        if (playing) { stopPlay(); return; }
+        playing = true; playIdx = 0; sel = 0;
+        playBtn.setText("\u25A0 Stop");
+        buildTimeline(); syncCaption(); loadPreview();
+    }
+
+    private void stopPlay() {
+        playing = false;
+        playBtn.setText("\u25B6 Play");
+        refresh(true);
+    }
+
+    private void duplicate() {
+        Clip s0 = cur();
+        if (s0 == null) return;
+        Clip k = new Clip();
+        k.dir = s0.dir; k.name = s0.name; k.thumb = s0.thumb; k.loops = s0.loops; k.fps = s0.fps; k.caption = s0.caption; k.capPos = s0.capPos;
+        clips.add(sel + 1, k);
+        sel = sel + 1;
+        persist();
+        refresh(true);
+    }
+
+    private void editCaption() {
+        final Clip k = cur();
+        if (k == null) return;
+        final EditText et = new EditText(a);
+        et.setSingleLine(true);
+        et.setText(k.caption);
+        et.setSelection(et.getText().length());
+        et.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(40)});
+        new AlertDialog.Builder(a, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Caption for this clip")
+                .setView(et)
+                .setPositiveButton("Set", new android.content.DialogInterface.OnClickListener() { @Override public void onClick(android.content.DialogInterface d, int w) {
+                    k.caption = et.getText().toString().trim(); persist(); syncCaption(); }})
+                .setNegativeButton("Clear", new android.content.DialogInterface.OnClickListener() { @Override public void onClick(android.content.DialogInterface d, int w) {
+                    k.caption = ""; persist(); syncCaption(); }})
+                .show();
+    }
+
+    private void syncCaption() {
+        Clip k = cur();
+        String[] pn = {"TOP", "MIDDLE", "BOTTOM"};
+        if (k == null || k.caption.isEmpty()) { capView.setVisibility(View.GONE); if (k != null) capPosBtn.setText("Text: " + pn[k.capPos]); return; }
+        capPosBtn.setText("Text: " + pn[k.capPos]);
+        capView.setText(k.caption);
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) capView.getLayoutParams();
+        lp.gravity = Gravity.CENTER_HORIZONTAL | (k.capPos == 0 ? Gravity.TOP : (k.capPos == 1 ? Gravity.CENTER_VERTICAL : Gravity.BOTTOM));
+        lp.topMargin = k.capPos == 0 ? dp(18) : 0;
+        lp.bottomMargin = k.capPos == 2 ? dp(18) : 0;
+        capView.setLayoutParams(lp);
+        capView.setVisibility(View.VISIBLE);
+    }
+
+    void onMusic(Uri u) {
+        try { a.getContentResolver().takePersistableUriPermission(u, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION); } catch (Exception ignored) {}
+        music = u;
+        musicName = "";
+        try {
+            Cursor c = a.getContentResolver().query(u, new String[]{android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null);
+            if (c != null) { try { if (c.moveToFirst()) musicName = c.getString(0); } finally { c.close(); } }
+        } catch (Exception ignored) {}
+        persist();
+        syncMusic();
+    }
+
+    private void syncMusic() {
+        if (music == null) { musicBtn.setText("+ Music"); musicBtn.setSel(false); return; }
+        String n = musicName == null || musicName.isEmpty() ? "TRACK" : musicName;
+        if (n.length() > 16) n = n.substring(0, 15) + "\u2026";
+        musicBtn.setText(n + "  \u2715");
+        musicBtn.setSel(true);
+    }
+
+    private static String stampText(Clip c) {
+        try {
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("_(\\d{4})(\\d{2})(\\d{2})_").matcher(c.name);
+            if (m.find()) return "'" + m.group(1).substring(2) + " " + m.group(2) + " " + m.group(3);
+        } catch (Exception ignored) {}
+        return new SimpleDateFormat("''yy MM dd", Locale.US).format(new Date());
+    }
+
+    private static void drawCaption(Bitmap b, String text, int pos) {
+        Canvas c = new Canvas(b);
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setTypeface(W.DOT);
+        p.setTextAlign(Paint.Align.CENTER);
+        float size = b.getWidth() * 0.065f;
+        p.setTextSize(size);
+        float maxW = b.getWidth() * 0.88f, tw = p.measureText(text);
+        if (tw > maxW) { size *= maxW / tw; p.setTextSize(size); }
+        float y = pos == 0 ? b.getHeight() * 0.09f + size : (pos == 1 ? b.getHeight() / 2f + size / 3f : b.getHeight() * 0.9f);
+        p.setColor(0xFFE8873A);
+        p.setShadowLayer(size * 0.5f, 0, 0, 0xCCE8873A);
+        c.drawText(text, b.getWidth() / 2f, y, p);
+        p.setShadowLayer(0, 0, 0, 0);
+        p.setColor(0xFFFFD3AE);
+        c.drawText(text, b.getWidth() / 2f, y, p);
+    }
+
     // ------------------------------------------------------------------ export
     private void export() {
         if (exporting || clips.isEmpty()) return;
+        if (playing) stopPlay();
         exporting = true;
+        musicSkipped = false;
         exportBtn.setEnabled(false); exportBtn.setText("Rendering…");
         shareBtn.setVisibility(View.GONE);
         final List<Clip> cl = new ArrayList<Clip>(clips);
         final int st = stock, gr = grain, str = strength, tr = trans, asp = aspect;
-        final boolean bnc = bounce();
+        final boolean bnc = bounce(), dateOn = dateStamp;
+        final Uri mus = music;
         new Thread(new Runnable() { @Override public void run() {
             Uri u = null; String err = null;
-            try { u = render(cl, st, gr, str, tr, asp, bnc); }
+            try { u = render(cl, st, gr, str, tr, asp, bnc, dateOn, mus); }
             catch (Throwable t) { err = t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName(); }
             final Uri fu = u; final String fe = err;
             a.runOnUiThread(new Runnable() { @Override public void run() {
@@ -579,7 +751,7 @@ public final class ReelEditor {
                 exportBtn.setText("Export reel"); exportBtn.setEnabled(!clips.isEmpty());
                 if (fu == null) { status.setText("EXPORT FAILED: " + fe); return; }
                 lastUri = fu;
-                status.setText("SAVED TO MOVIES/AURELIUS7");
+                status.setText(musicSkipped ? "SAVED · MUSIC SKIPPED (NEEDS AAC/M4A)" : "SAVED TO MOVIES/AURELIUS7");
                 shareBtn.setVisibility(View.VISIBLE);
                 a.buzz(25);
                 a.loadGallery();
@@ -591,11 +763,12 @@ public final class ReelEditor {
         a.runOnUiThread(new Runnable() { @Override public void run() { status.setText(t); } });
     }
 
-    private Uri render(List<Clip> cl, int st, int gr, int str, int tr, int asp, boolean bnc) throws Exception {
+    private Uri render(List<Clip> cl, int st, int gr, int str, int tr, int asp, boolean bnc, boolean dateOn, Uri mus) throws Exception {
         final int W0 = 720, H0 = asp == 0 ? 1280 : (asp == 1 ? 896 : 720);
         int[] sq = bnc ? new int[]{0, 1, 2, 3, 2, 1} : new int[]{0, 1, 2, 3};
         File tmp = new File(a.getCacheDir(), "reel_" + System.currentTimeMillis() + ".mp4");
         ReelEncoder enc = new ReelEncoder(tmp, W0, H0);
+        if (mus != null && !enc.setAudio(a, mus)) musicSkipped = true;
         Bitmap prevLast = null, scratch = null;
         try {
             int n = 0;
@@ -609,6 +782,10 @@ public final class ReelEditor {
                 if (st != 0 || gr > 0) {
                     fr = Develop.apply(fit, st, gr, str, false, null);
                     for (Bitmap b : fit) b.recycle();
+                }
+                for (Bitmap b : fr) {
+                    if (dateOn) Develop.stamp(b, stampText(c), W.DOT);
+                    if (!c.caption.isEmpty()) drawCaption(b, c.caption, c.capPos);
                 }
                 if (prevLast != null && tr != 0) {
                     if (scratch == null) scratch = Bitmap.createBitmap(W0, H0, Bitmap.Config.ARGB_8888);
