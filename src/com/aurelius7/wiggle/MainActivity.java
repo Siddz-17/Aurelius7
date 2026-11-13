@@ -232,7 +232,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         orbit = prefs.getInt("mode", 0) == 1;
         depthIdx = prefs.getInt("depth", 1);
         flashIdx = prefs.getInt("flash", 0);
-        liveStock = prefs.getInt("stock", 1);
+        liveStock = prefs.getInt("stock", 0);
         dateStamp = prefs.getBoolean("date", true);
         mp4 = prefs.getInt("format", 0) == 1;
         bounce = prefs.getInt("loop", 0) == 0;
@@ -251,7 +251,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     void put(String k, boolean v) { prefs.edit().putBoolean(k, v).apply(); }
 
     private int defaultGrain(int stock) {
-        return Math.min(100, Math.round(Develop.STOCK_GRAIN[stock] * GRAIN_LEVELS[prefs.getInt("grainLevel", 2)]));
+        return Math.min(100, Math.round(Develop.STOCK_GRAIN[stock] * GRAIN_LEVELS[prefs.getInt("grainLevel", 1)]));
     }
 
     int dp(float v) { return W.dpi(this, v); }
@@ -1113,7 +1113,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         setStockScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
         setStockScroll.addView(stp, new FrameLayout.LayoutParams(-2, -2));
         setRowStacked(g, "Default stock", setStockScroll);
-        W.Segmented gl = new W.Segmented(this, new String[]{"Off", "Fine", "Med", "Heavy"}, prefs.getInt("grainLevel", 2), false);
+        W.Segmented gl = new W.Segmented(this, new String[]{"Off", "Fine", "Med", "Heavy"}, prefs.getInt("grainLevel", 1), false);
         gl.listener = new W.Segmented.OnPick() { @Override public void onPick(int i) { put("grainLevel", i); applyLiveStock(); } };
         setRow(g, "Grain", null, gl, false);
         W.Toggle ds = new W.Toggle(this, dateStamp);
@@ -1583,7 +1583,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         rollPill.setEnabled(false);
         rollPill.setVisibility(View.VISIBLE);
         rollPill.setText("Developing 0/" + shots.size() + "\u2026");
-        final int grLevel = prefs.getInt("grainLevel", 2);
+        final int grLevel = prefs.getInt("grainLevel", 1);
         final boolean stamp = dateStamp, asMp4 = mp4, bord = borderOn;
         final int[] sq = seq; final int fms = frameMs;
         new Thread(new Runnable() { @Override public void run() {
