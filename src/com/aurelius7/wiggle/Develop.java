@@ -14,13 +14,69 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 
-/** Film "development": stock colour matrix, light leak, moving grain, date stamp. */
+/**
+ * Film "development". Every stock is a small parametric Look: colour matrix (saturation / contrast / channel
+ * gains), faded blacks, split-toning, vignette, halation glow, grain (amount + size) and an optional light leak.
+ * Indices 0..4 are kept stable (saved filenames and prefs refer to them); new looks are appended.
+ */
 public final class Develop {
     private Develop() {}
 
-    public static final String[] STOCKS = {"STD", "PORTRA", "TRI-X", "NIMSLO", "CINE"};
+    private static final class Look {
+        final String name;
+        float sat = 1f, con = 1f, bright = 0f, sepia = 0f;
+        float r = 1f, g = 1f, b = 1f;
+        float fade = 0f;                 // lifted blacks / softened whites, 0..0.3
+        int sh = 0, hi = 0;              // split-tone offsets, packed r,g,b each -40..40 (see tone())
+        float vig = 0f, halo = 0f;       // vignette strength, halation strength
+        int grain = 0, grainSize = 1;
+        boolean leak = false;
+        Look(String n) { name = n; }
+        Look sat(float v) { sat = v; return this; }
+        Look con(float c, float br) { con = c; bright = br; return this; }
+        Look gain(float rr, float gg, float bb) { r = rr; g = gg; b = bb; return this; }
+        Look sepia(float v) { sepia = v; return this; }
+        Look fade(float v) { fade = v; return this; }
+        Look tone(int sr, int sg, int sb, int hr, int hg, int hb) { sh = pack(sr, sg, sb); hi = pack(hr, hg, hb); return this; }
+        Look vig(float v) { vig = v; return this; }
+        Look halo(float v) { halo = v; return this; }
+        Look grain(int a, int size) { grain = a; grainSize = size; return this; }
+        Look leak() { leak = true; return this; }
+    }
+
+    private static int pack(int r, int g, int b) { return ((r + 64) << 16) | ((g + 64) << 8) | (b + 64); }
+    private static int ur(int p) { return ((p >> 16) & 255) - 64; }
+    private static int ug(int p) { return ((p >> 8) & 255) - 64; }
+    private static int ub(int p) { return (p & 255) - 64; }
+
+    private static final Look[] LOOKS = {
+            new Look("STD").grain(0, 1),
+            new Look("PORTRA").sepia(0.18f).sat(1.12f).gain(1.04f, 1f, 0.93f).con(1.04f, 6).fade(0.05f).grain(28, 1),
+            new Look("TRI-X").sat(0f).con(1.38f, 4).vig(0.18f).grain(50, 2),
+            new Look("NIMSLO").sepia(0.38f).sat(0.85f).con(0.86f, 18).fade(0.04f).vig(0.12f).grain(34, 2).leak(),
+            new Look("CINE").sat(1.25f).gain(1.07f, 0.99f, 1.04f).con(1.12f, -4).tone(-6, 2, 8, 8, 2, -6).grain(22, 1),
+            // --- v0.6 ---
+            new Look("EKTAR").sat(1.38f).con(1.18f, 0).gain(1.03f, 1f, 0.97f).vig(0.12f).grain(14, 1),
+            new Look("KODA").sat(1.2f).con(1.15f, 0).gain(1.06f, 0.99f, 0.91f).vig(0.24f).grain(24, 1),
+            new Look("FUJI").sat(1.16f).con(1.06f, 0).gain(0.97f, 1.03f, 1.04f).fade(0.04f).tone(-8, 4, 8, 4, 2, -2).grain(22, 1),
+            new Look("GOLD").sat(1.2f).con(1.04f, 4).gain(1.08f, 1.02f, 0.86f).fade(0.06f).vig(0.2f).grain(30, 2),
+            new Look("800T").sat(1.1f).con(1.1f, 0).gain(0.97f, 1f, 1.06f).tone(-10, 2, 12, 12, 0, -10).vig(0.2f).halo(0.9f).grain(40, 2),
+            new Look("TEAL").sat(1.1f).con(1.16f, -2).tone(-16, 4, 14, 18, 4, -14).vig(0.25f).grain(18, 1),
+            new Look("NOIR").sat(0f).con(1.5f, -4).fade(0.03f).vig(0.45f).grain(58, 2),
+            new Look("ILFORD").sat(0f).con(1.12f, 6).fade(0.1f).vig(0.12f).grain(46, 3),
+            new Look("MATTE").sat(0.85f).con(0.96f, 4).fade(0.22f).tone(-4, 3, 3, 3, 2, -2).grain(12, 1),
+            new Look("FADED").sat(0.75f).con(0.94f, 8).gain(1.03f, 1f, 0.95f).fade(0.18f).vig(0.15f).grain(26, 2),
+            new Look("POLA").sat(0.95f).con(1.02f, 6).gain(1.03f, 1f, 0.94f).fade(0.12f).tone(6, -2, 8, 10, 4, -8).vig(0.3f).halo(0.25f).grain(20, 2),
+            new Look("HOUR").sat(1.18f).con(1.1f, 0).gain(1.08f, 1f, 0.9f).tone(10, -4, 12, 16, 6, -14).vig(0.2f).halo(0.35f).grain(18, 1),
+            new Look("BLEACH").sat(0.5f).con(1.32f, -6).vig(0.3f).grain(42, 2),
+    };
+
+    public static final String[] STOCKS = new String[LOOKS.length];
     /** Default grain (0..100) each stock ships with. */
-    public static final int[] STOCK_GRAIN = {0, 28, 50, 34, 22};
+    public static final int[] STOCK_GRAIN = new int[LOOKS.length];
+    static {
+        for (int i = 0; i < LOOKS.length; i++) { STOCKS[i] = LOOKS[i].name; STOCK_GRAIN[i] = LOOKS[i].grain; }
+    }
 
     private static ColorMatrix contrast(float c, float bright) {
         float t = 128f * (1f - c) + bright;
@@ -48,57 +104,83 @@ public final class Develop {
                 0, 0, 0, 1, 0});
     }
 
-    public static ColorMatrix matrix(int stock) {
+    private static Look look(int stock) { return LOOKS[stock < 0 || stock >= LOOKS.length ? 0 : stock]; }
+
+    /** Colour part of a look (saturation, gains, contrast). Hardware-friendly, also used for the live preview. */
+    private static ColorMatrix baseMatrix(Look l) {
         ColorMatrix m = new ColorMatrix();
-        switch (stock) {
-            case 1: { // PORTRA: warm, soft, lifted blacks
-                m.postConcat(sepia(0.18f));
-                ColorMatrix s = new ColorMatrix(); s.setSaturation(1.12f); m.postConcat(s);
-                m.postConcat(scale(1.04f, 1.0f, 0.93f, 6));
-                m.postConcat(contrast(1.04f, 6));
-                break;
-            }
-            case 2: { // TRI-X: punchy black & white
-                ColorMatrix s = new ColorMatrix(); s.setSaturation(0f); m.postConcat(s);
-                m.postConcat(contrast(1.38f, 4));
-                break;
-            }
-            case 3: { // NIMSLO: faded 80s print
-                m.postConcat(sepia(0.38f));
-                ColorMatrix s = new ColorMatrix(); s.setSaturation(0.85f); m.postConcat(s);
-                m.postConcat(contrast(0.86f, 18));
-                break;
-            }
-            case 4: { // CINE: warm highs, cool shadows-ish, saturated
-                ColorMatrix s = new ColorMatrix(); s.setSaturation(1.25f); m.postConcat(s);
-                m.postConcat(scale(1.07f, 0.99f, 1.04f, -4));
-                m.postConcat(contrast(1.12f, 0));
-                break;
-            }
-            default: break;
-        }
+        if (l.sepia > 0) m.postConcat(sepia(l.sepia));
+        if (l.sat != 1f) { ColorMatrix s = new ColorMatrix(); s.setSaturation(l.sat); m.postConcat(s); }
+        if (l.r != 1f || l.g != 1f || l.b != 1f) m.postConcat(scale(l.r, l.g, l.b, l.sepia > 0 ? 6 : 0));
+        if (l.con != 1f || l.bright != 0f) m.postConcat(contrast(l.con, l.bright));
         return m;
     }
 
-    public static boolean hasLeak(int stock) { return stock == 3; }
+    /** Live-preview matrix: the colour part plus a cheap stand-in for the faded blacks. */
+    public static ColorMatrix matrix(int stock) {
+        Look l = look(stock);
+        ColorMatrix m = baseMatrix(l);
+        if (l.fade > 0) m.postConcat(scale(1f - l.fade * 0.25f, 1f - l.fade * 0.25f, 1f - l.fade * 0.25f, l.fade * 60f));
+        return m;
+    }
 
-    /** Returns new developed bitmaps; inputs untouched. */
+    public static boolean hasLeak(int stock) { return look(stock).leak; }
+
     public static Bitmap[] apply(Bitmap[] src, int stock, int grain, boolean dateStamp, android.graphics.Typeface dot) {
+        return apply(src, stock, grain, 100, dateStamp, dot);
+    }
+
+    /** Returns new developed bitmaps; inputs untouched. strength 0..100 blends the look over the original. */
+    public static Bitmap[] apply(Bitmap[] src, int stock, int grain, int strength, boolean dateStamp, android.graphics.Typeface dot) {
+        Look l = look(stock);
+        strength = Math.max(0, Math.min(100, strength));
         Bitmap[] out = new Bitmap[src.length];
         Paint p = new Paint(Paint.FILTER_BITMAP_FLAG);
-        p.setColorFilter(new ColorMatrixColorFilter(matrix(stock)));
+        p.setColorFilter(new ColorMatrixColorFilter(baseMatrix(l)));
         String stamp = new SimpleDateFormat("''yy MM dd", Locale.US).format(new Date());
         for (int k = 0; k < src.length; k++) {
             int w = src[k].getWidth(), h = src[k].getHeight();
             Bitmap b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
             Canvas c = new Canvas(b);
             c.drawBitmap(src[k], 0, 0, p);
-            if (hasLeak(stock)) drawLeak(c, w, h, k);
-            if (grain > 0) addGrain(b, grain, 0x9E3779B9 * (k + 1));
+            if (l.halo > 0) drawHalation(c, b, l.halo);
+            if (l.leak) drawLeak(c, w, h, k);
+            grade(b, l, grain, 0x9E3779B9 * (k + 1));
+            if (strength < 100) {
+                Bitmap m = src[k].copy(Bitmap.Config.ARGB_8888, true);
+                Paint ap = new Paint(Paint.FILTER_BITMAP_FLAG);
+                ap.setAlpha(Math.round(strength * 2.55f));
+                new Canvas(m).drawBitmap(b, 0, 0, ap);
+                b.recycle();
+                b = m;
+                c = new Canvas(b);
+            }
             if (dateStamp) drawStamp(c, w, h, stamp, dot);
             out[k] = b;
         }
         return out;
+    }
+
+    /** Red-orange bloom around bright highlights (what CineStill-style film does at light sources). */
+    private static void drawHalation(Canvas c, Bitmap b, float amt) {
+        int w = b.getWidth(), h = b.getHeight();
+        int sw = Math.max(8, w / 10), sh = Math.max(8, h / 10);
+        Bitmap small = Bitmap.createScaledBitmap(b, sw, sh, true);
+        Bitmap tiny = Bitmap.createScaledBitmap(small, Math.max(4, sw / 3), Math.max(4, sh / 3), true);
+        Paint t = new Paint(Paint.FILTER_BITMAP_FLAG);
+        float th = 190f;
+        t.setColorFilter(new ColorMatrixColorFilter(new ColorMatrix(new float[]{
+                5f, 0, 0, 0, -5f * th,
+                0, 1.3f, 0, 0, -1.3f * th,
+                0, 0, 0.45f, 0, -0.45f * th,
+                0, 0, 0, 1, 0})));
+        Bitmap glow = Bitmap.createBitmap(tiny.getWidth(), tiny.getHeight(), Bitmap.Config.ARGB_8888);
+        new Canvas(glow).drawBitmap(tiny, 0, 0, t);
+        Paint s = new Paint(Paint.FILTER_BITMAP_FLAG);
+        s.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SCREEN));
+        s.setAlpha(Math.round(Math.min(1f, amt) * 255));
+        c.drawBitmap(glow, null, new android.graphics.Rect(0, 0, w, h), s);
+        small.recycle(); tiny.recycle(); glow.recycle();
     }
 
     private static void drawLeak(Canvas c, int w, int h, int k) {
@@ -113,27 +195,74 @@ public final class Develop {
         c.drawRect(0, 0, w, h, lp);
     }
 
-    /** Monochrome grain, strongest in the mid-tones, different per view so it "moves" in the loop. */
-    private static void addGrain(Bitmap b, int grain, int seed) {
+    /**
+     * One integer pass: faded blacks, split-toning, vignette and grain (mid-tone weighted, with block size for
+     * coarse grain; a different pattern per view so it moves in the loop).
+     */
+    private static void grade(Bitmap b, Look l, int grain, int seed) {
+        boolean doTone = l.sh != 0 || l.hi != 0, doFade = l.fade > 0, doVig = l.vig > 0, doGrain = grain > 0;
+        if (!doTone && !doFade && !doVig && !doGrain) return;
         int w = b.getWidth(), h = b.getHeight();
         int[] px = new int[w * h];
         b.getPixels(px, 0, w, 0, 0, w, h);
+
+        int lo = Math.round(l.fade * 50f), span = 256 - lo - Math.round(l.fade * 14f); // c' = lo + c*span/256
+        int[] shW = new int[256], hiW = new int[256];
+        for (int i = 0; i < 256; i++) {
+            float t = i / 255f;
+            shW[i] = Math.round((1f - t) * (1f - t) * 256f);
+            hiW[i] = Math.round(t * t * 256f);
+        }
+        int sr = ur(l.sh), sg = ug(l.sh), sb = ub(l.sh), hr = ur(l.hi), hg = ug(l.hi), hb = ub(l.hi);
+
+        int[] vx = null, vy = null;
+        if (doVig) {
+            vx = new int[w]; vy = new int[h];
+            float cx = (w - 1) / 2f, cy = (h - 1) / 2f;
+            for (int x = 0; x < w; x++) { float d = (x - cx) / cx; vx[x] = Math.round(d * d * l.vig * 150f); }
+            for (int y = 0; y < h; y++) { float d = (y - cy) / cy; vy[y] = Math.round(d * d * l.vig * 150f); }
+        }
+
+        int sh = Math.max(1, l.grainSize), bw = 0, bh = 0;
+        int[] nz = null;
         int amp = Math.round(grain / 100f * 56f);
-        int s = seed == 0 ? 1 : seed;
-        for (int i = 0; i < px.length; i++) {
-            s ^= s << 13; s ^= s >>> 17; s ^= s << 5;
-            // two uniform samples -> triangle distribution (softer than pure uniform)
-            int n = ((s & 0xFF) + ((s >>> 8) & 0xFF)) - 255;
-            int c = px[i];
-            int r = (c >> 16) & 255, g = (c >> 8) & 255, bl = c & 255;
-            int lum = (r * 77 + g * 150 + bl * 29) >> 8;
-            int mid = 255 - Math.abs(lum - 128) * 3 / 2; // weight 63..255
-            int d = (n * amp * mid) >> 16;
-            r += d; g += d; bl += d;
-            r = r < 0 ? 0 : (r > 255 ? 255 : r);
-            g = g < 0 ? 0 : (g > 255 ? 255 : g);
-            bl = bl < 0 ? 0 : (bl > 255 ? 255 : bl);
-            px[i] = 0xFF000000 | (r << 16) | (g << 8) | bl;
+        if (doGrain) {
+            bw = (w + sh - 1) / sh; bh = (h + sh - 1) / sh;
+            nz = new int[bw * bh];
+            int s = seed == 0 ? 1 : seed;
+            for (int i = 0; i < nz.length; i++) {
+                s ^= s << 13; s ^= s >>> 17; s ^= s << 5;
+                nz[i] = ((s & 0xFF) + ((s >>> 8) & 0xFF)) - 255; // triangle distribution
+            }
+        }
+
+        for (int y = 0; y < h; y++) {
+            int row = y * w;
+            int nrow = (y / sh) * bw;
+            int vyy = doVig ? vy[y] : 0;
+            for (int x = 0; x < w; x++) {
+                int c = px[row + x];
+                int r = (c >> 16) & 255, g = (c >> 8) & 255, bl = c & 255;
+                if (doFade) { r = lo + ((r * span) >> 8); g = lo + ((g * span) >> 8); bl = lo + ((bl * span) >> 8); }
+                int lum = (r * 77 + g * 150 + bl * 29) >> 8;
+                if (doTone) {
+                    int ws = shW[lum], wh = hiW[lum];
+                    r += (sr * ws + hr * wh) >> 8; g += (sg * ws + hg * wh) >> 8; bl += (sb * ws + hb * wh) >> 8;
+                }
+                if (doVig) {
+                    int v = 256 - (vx[x] + vyy); if (v < 40) v = 40;
+                    r = (r * v) >> 8; g = (g * v) >> 8; bl = (bl * v) >> 8;
+                }
+                if (doGrain) {
+                    int mid = 255 - Math.abs(lum - 128) * 3 / 2;
+                    int d = (nz[nrow + x / sh] * amp * mid) >> 16;
+                    r += d; g += d; bl += d;
+                }
+                r = r < 0 ? 0 : (r > 255 ? 255 : r);
+                g = g < 0 ? 0 : (g > 255 ? 255 : g);
+                bl = bl < 0 ? 0 : (bl > 255 ? 255 : bl);
+                px[row + x] = 0xFF000000 | (r << 16) | (g << 8) | bl;
+            }
         }
         b.setPixels(px, 0, w, 0, 0, w, h);
     }

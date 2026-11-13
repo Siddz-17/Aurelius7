@@ -73,9 +73,9 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     private static final String[] FLASH_NAMES = {"OFF", "AUTO", "ON"};
     private static final float[] GRAIN_LEVELS = {0f, 0.6f, 1f, 1.6f};
 
-    private final Handler ui = new Handler(Looper.getMainLooper());
+    final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
-    private SharedPreferences prefs;
+    SharedPreferences prefs;
     private String VERSION = "v?";
     private int versionCode;
     private int state = ST_PREVIEW;
@@ -88,8 +88,10 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     private W.GrainView grainLive;
     private W.Brackets brackets;
     private W.Pill flashPill, expPill, infoPill, updatePill;
-    private final W.Pill[] camStocks = new W.Pill[5];
-    private LinearLayout camStockRow;
+    private final W.Pill[] camStocks = new W.Pill[Develop.STOCKS.length];
+    private final W.Pill[] setStocks = new W.Pill[Develop.STOCKS.length];
+    private android.widget.HorizontalScrollView resStockScroll, setStockScroll;
+    private android.widget.HorizontalScrollView camStockRow;
     private W.SweepHud hud;
     private W.ModeDial dial;
     private W.Shutter shutter;
@@ -100,8 +102,10 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     // result screen
     private W.FilmStage stage;
     private TextView resSub, grainVal, speedVal;
-    private final W.Pill[] resStocks = new W.Pill[5];
-    private W.Slider grainSlider, speedSlider;
+    private final W.Pill[] resStocks = new W.Pill[Develop.STOCKS.length];
+    private W.Slider grainSlider, speedSlider, strengthSlider;
+    private TextView strengthVal;
+    private int strength = 100;
     private W.Segmented ratioSeg, formatSeg;
     private W.Pill saveBtn, shareBtn, retakeBtn;
 
@@ -159,10 +163,26 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     private final java.util.HashMap<String, Bitmap> thumbCache = new java.util.HashMap<String, Bitmap>();
 
     /** Background work that must never crash the app if the activity is already gone. */
-    private void bgRun(Runnable r) {
+    void bgRun(Runnable r) {
         try { worker.execute(r); } catch (java.util.concurrent.RejectedExecutionException ignored) {}
     }
     private W.ScreenLight screenLight;
+    private ReelEditor editor;
+    private View editorScreen;
+
+    boolean isShowing(View v) { return currentScreen == v; }
+    void showGallery() { show(galleryScreen); }
+
+    void openEditor() {
+        if (editor == null) {
+            editor = new ReelEditor(this);
+            editorScreen = editor.build();
+            editorScreen.setVisibility(View.GONE);
+            root.addView(editorScreen, new FrameLayout.LayoutParams(-1, -1));
+        }
+        show(editorScreen);
+        editor.onShow();
+    }
     private W.IconBtn flipBtn;
 
     // ================================================================= setup
@@ -227,16 +247,16 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         mirrorSelfie = prefs.getBoolean("mirrorSelfie", false);
     }
 
-    private void put(String k, int v) { prefs.edit().putInt(k, v).apply(); }
-    private void put(String k, boolean v) { prefs.edit().putBoolean(k, v).apply(); }
+    void put(String k, int v) { prefs.edit().putInt(k, v).apply(); }
+    void put(String k, boolean v) { prefs.edit().putBoolean(k, v).apply(); }
 
     private int defaultGrain(int stock) {
         return Math.min(100, Math.round(Develop.STOCK_GRAIN[stock] * GRAIN_LEVELS[prefs.getInt("grainLevel", 2)]));
     }
 
-    private int dp(float v) { return W.dpi(this, v); }
+    int dp(float v) { return W.dpi(this, v); }
 
-    private void show(View screen) {
+    void show(View screen) {
         if (currentScreen != null) currentScreen.setVisibility(View.GONE);
         currentScreen = screen;
         screen.setVisibility(View.VISIBLE);
@@ -335,37 +355,37 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         }});
     }
 
-    private TextView text(String t, float sp, int color, android.graphics.Typeface tf) {
+    TextView text(String t, float sp, int color, android.graphics.Typeface tf) {
         TextView tv = new TextView(this);
         tv.setText(t); tv.setTextSize(sp); tv.setTextColor(color); tv.setTypeface(tf);
         tv.setIncludeFontPadding(false);
         return tv;
     }
 
-    private W.Pill pill(String t, int icon, int style, float sp, boolean dot) {
+    W.Pill pill(String t, int icon, int style, float sp, boolean dot) {
         W.Pill p = new W.Pill(this, t, icon, style, sp, W.UI_SEMI);
         if (dot) p.dotFont();
         return p;
     }
 
-    private W.Pill bigPill(String t, int style) { return new W.Pill(this, t, W.IC_NONE, style, 16, W.HEAD); }
+    W.Pill bigPill(String t, int style) { return new W.Pill(this, t, W.IC_NONE, style, 16, W.HEAD); }
 
-    private LinearLayout row() {
+    LinearLayout row() {
         LinearLayout l = new LinearLayout(this);
         l.setOrientation(LinearLayout.HORIZONTAL);
         l.setGravity(Gravity.CENTER_VERTICAL);
         return l;
     }
 
-    private LinearLayout col() {
+    LinearLayout col() {
         LinearLayout l = new LinearLayout(this);
         l.setOrientation(LinearLayout.VERTICAL);
         return l;
     }
 
-    private View spacer() { View v = new View(this); v.setLayoutParams(new LinearLayout.LayoutParams(0, 1, 1)); return v; }
-    private LinearLayout.LayoutParams lp(int w, int h) { return new LinearLayout.LayoutParams(w, h); }
-    private LinearLayout.LayoutParams lpw(int h, float weight) { return new LinearLayout.LayoutParams(0, h, weight); }
+    View spacer() { View v = new View(this); v.setLayoutParams(new LinearLayout.LayoutParams(0, 1, 1)); return v; }
+    LinearLayout.LayoutParams lp(int w, int h) { return new LinearLayout.LayoutParams(w, h); }
+    LinearLayout.LayoutParams lpw(int h, float weight) { return new LinearLayout.LayoutParams(0, h, weight); }
 
     // ================================================================= WELCOME
     private View buildWelcome() {
@@ -529,17 +549,21 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         ulp.topMargin = dp(102);
         vp.addView(updatePill, ulp);
 
-        camStockRow = row();
-        camStockRow.setGravity(Gravity.CENTER);
-        for (int i = 0; i < 5; i++) {
+        LinearLayout camPills = row();
+        camPills.setPadding(dp(14), 0, dp(14), 0);
+        for (int i = 0; i < camStocks.length; i++) {
             final int idx = i;
             camStocks[i] = pill(Develop.STOCKS[i], W.IC_NONE, W.Pill.GLASS_STYLE, 12, true);
             camStocks[i].setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
                 liveStock = idx; put("stock", idx); applyLiveStock(); }});
             LinearLayout.LayoutParams p = lp(-2, dp(34)); if (i > 0) p.leftMargin = dp(6);
-            camStockRow.addView(camStocks[i], p);
+            camPills.addView(camStocks[i], p);
         }
-        FrameLayout.LayoutParams slp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        camStockRow = new android.widget.HorizontalScrollView(this);
+        camStockRow.setHorizontalScrollBarEnabled(false);
+        camStockRow.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        camStockRow.addView(camPills, new FrameLayout.LayoutParams(-2, -2));
+        FrameLayout.LayoutParams slp = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM);
         slp.bottomMargin = dp(14);
         vp.addView(camStockRow, slp);
 
@@ -613,11 +637,21 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     }
 
     private void applyLiveStock() {
-        for (int i = 0; i < 5; i++) camStocks[i].setSel(i == liveStock);
+        for (int i = 0; i < camStocks.length; i++) { camStocks[i].setSel(i == liveStock); if (setStocks[i] != null) setStocks[i].setSel(i == liveStock); }
+        scrollTo(camStockRow, camStocks[liveStock]);
+        if (setStockScroll != null) scrollTo(setStockScroll, setStocks[liveStock]);
         Paint lp = new Paint();
         lp.setColorFilter(new ColorMatrixColorFilter(Develop.matrix(liveStock)));
         texture.setLayerPaint(lp);
         grainLive.set(defaultGrain(liveStock) / 100f * 0.7f, Develop.hasLeak(liveStock));
+    }
+
+    private void scrollTo(final android.widget.HorizontalScrollView sv, final View target) {
+        if (sv == null || target == null) return;
+        sv.post(new Runnable() { @Override public void run() {
+            int x = target.getLeft() + (target.getWidth() - sv.getWidth()) / 2 + dp(14);
+            sv.smoothScrollTo(Math.max(0, x), 0);
+        }});
     }
 
     private void setPreviewState() {
@@ -685,15 +719,19 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         s.addView(panel, lp(-1, -2));
 
         LinearLayout stocks = row();
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < resStocks.length; i++) {
             final int idx = i;
             resStocks[i] = pill(Develop.STOCKS[i], W.IC_NONE, W.Pill.GHOST, 11, true);
             resStocks[i].setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
                 resStock = idx; grain = defaultGrain(idx); syncResultControls(); markDirty(); develop(); }});
-            LinearLayout.LayoutParams p = lpw(dp(34), 1); if (i > 0) p.leftMargin = dp(5);
+            LinearLayout.LayoutParams p = lp(-2, dp(34)); if (i > 0) p.leftMargin = dp(6);
             stocks.addView(resStocks[i], p);
         }
-        panel.addView(stocks, lp(-1, -2));
+        resStockScroll = new android.widget.HorizontalScrollView(this);
+        resStockScroll.setHorizontalScrollBarEnabled(false);
+        resStockScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        resStockScroll.addView(stocks, new FrameLayout.LayoutParams(-2, -2));
+        panel.addView(resStockScroll, lp(-1, -2));
 
         LinearLayout gr = row();
         gr.addView(text("Grain", 12, W.MUT, W.UI), lp(dp(64), -2));
@@ -708,6 +746,19 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         gr.addView(grainVal, lp(dp(46), -2));
         LinearLayout.LayoutParams grl = lp(-1, -2); grl.topMargin = dp(10);
         panel.addView(gr, grl);
+
+        LinearLayout str = row();
+        str.addView(text("Strength", 12, W.MUT, W.UI), lp(dp(64), -2));
+        strengthSlider = new W.Slider(this);
+        strengthSlider.setContentDescription("Look strength");
+        strengthSlider.listener = new W.Slider.OnChange() { @Override public void onChange(float v, boolean done) {
+            strength = Math.round(v * 100); strengthVal.setText(strength + "%");
+            if (done) { markDirty(); develop(); } }};
+        str.addView(strengthSlider, lpw(dp(36), 1));
+        strengthVal = text("100%", 12, W.TXT, W.DOT);
+        strengthVal.setGravity(Gravity.END);
+        str.addView(strengthVal, lp(dp(46), -2));
+        panel.addView(str, lp(-1, -2));
 
         LinearLayout spr = row();
         spr.addView(text("Speed", 12, W.MUT, W.UI), lp(dp(64), -2));
@@ -771,7 +822,10 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     }
 
     private void syncResultControls() {
-        for (int i = 0; i < 5; i++) resStocks[i].setSel(i == resStock);
+        for (int i = 0; i < resStocks.length; i++) resStocks[i].setSel(i == resStock);
+        scrollTo(resStockScroll, resStocks[resStock]);
+        strengthSlider.setValue(strength / 100f);
+        strengthVal.setText(strength + "%");
         grainSlider.setValue(grain / 100f);
         grainVal.setText(String.valueOf(grain));
         int fps = Math.round(1000f / frameMs);
@@ -819,6 +873,10 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
             LinearLayout.LayoutParams p = lp(-2, dp(36)); if (i > 0) p.leftMargin = dp(8);
             f.addView(galFilters[i], p);
         }
+        f.addView(spacer());
+        W.Pill reelPill = pill("Reel editor", W.IC_NONE, W.Pill.SOLID, 13, false);
+        reelPill.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { openEditor(); } });
+        f.addView(reelPill, lp(-2, dp(36)));
         LinearLayout.LayoutParams fl = lp(-1, -2); fl.topMargin = dp(16); fl.bottomMargin = dp(14);
         s.addView(f, fl);
 
@@ -843,7 +901,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         return s;
     }
 
-    private void loadGallery() {
+    void loadGallery() {
         final ContentResolver cr = getContentResolver();
         bgRun(new Runnable() { @Override public void run() {
             final List<Item> items = new ArrayList<Item>();
@@ -1040,9 +1098,21 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         setRow(g, "Flash", "In a sweep the light stays on the whole time", fls, true);
 
         g = group(s, "FILM");
-        W.Segmented st = new W.Segmented(this, new String[]{"STD", "PORTRA", "TRI-X", "NIMSLO", "CINE"}, liveStock, true);
-        st.listener = new W.Segmented.OnPick() { @Override public void onPick(int i) { liveStock = i; put("stock", i); applyLiveStock(); } };
-        setRowStacked(g, "Default stock", st);
+        LinearLayout stp = row();
+        for (int i = 0; i < setStocks.length; i++) {
+            final int idx = i;
+            setStocks[i] = pill(Develop.STOCKS[i], W.IC_NONE, W.Pill.GHOST, 11, true);
+            setStocks[i].setSel(i == liveStock);
+            setStocks[i].setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+                liveStock = idx; put("stock", idx); applyLiveStock(); }});
+            LinearLayout.LayoutParams p = lp(-2, dp(34)); if (i > 0) p.leftMargin = dp(6);
+            stp.addView(setStocks[i], p);
+        }
+        setStockScroll = new android.widget.HorizontalScrollView(this);
+        setStockScroll.setHorizontalScrollBarEnabled(false);
+        setStockScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        setStockScroll.addView(stp, new FrameLayout.LayoutParams(-2, -2));
+        setRowStacked(g, "Default stock", setStockScroll);
         W.Segmented gl = new W.Segmented(this, new String[]{"Off", "Fine", "Med", "Heavy"}, prefs.getInt("grainLevel", 2), false);
         gl.listener = new W.Segmented.OnPick() { @Override public void onPick(int i) { put("grainLevel", i); applyLiveStock(); } };
         setRow(g, "Grain", null, gl, false);
@@ -1449,7 +1519,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
                     if (state != ST_PROCESS) return;
                     if (fe != null) { setPreviewState(); flashInfo(fe); return; }
                     composer = fc; baseFrames = fb; outFrames = fd;
-                    resStock = stock; grain = gr;
+                    resStock = stock; grain = gr; strength = 100;
                     thumb.setBitmap(fd[0]);
                     showResult(fl);
                 }});
@@ -1582,11 +1652,11 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         if (baseFrames == null) return;
         final int gen = ++devGen;
         final Bitmap[] base = baseFrames;
-        final int stock = resStock, gr = grain;
+        final int stock = resStock, gr = grain, str = strength;
         final boolean stamp = dateStamp;
         bgRun(new Runnable() { @Override public void run() {
             if (gen != devGen) return;
-            final Bitmap[] dev = Develop.apply(base, stock, gr, stamp, W.DOT);
+            final Bitmap[] dev = Develop.apply(base, stock, gr, str, stamp, W.DOT);
             ui.post(new Runnable() { @Override public void run() {
                 if (gen != devGen) return;
                 outFrames = dev;
@@ -1618,6 +1688,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     @Override public void onBackPressed() {
         if (currentScreen == resultScreen) { retake(); return; }
         if (currentScreen == viewerScreen) { closeViewer(); return; }
+        if (editorScreen != null && currentScreen == editorScreen) { editor.onBack(); return; }
         if (currentScreen == galleryScreen || currentScreen == settingsScreen) { show(cameraScreen); return; }
         if (state == ST_CAPTURE && recorder != null) { recorder.finishNow(); return; }
         super.onBackPressed();
@@ -1842,7 +1913,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         show(galleryScreen);
     }
 
-    private void share(Uri uri, String mime) {
+    void share(Uri uri, String mime) {
         Intent i = new Intent(Intent.ACTION_SEND);
         i.setType(mime);
         i.putExtra(Intent.EXTRA_STREAM, uri);
@@ -1851,7 +1922,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         try { startActivity(Intent.createChooser(i, "Share wiggle")); } catch (Exception ignored) {}
     }
 
-    private void showStamp(String t) {
+    void showStamp(String t) {
         final TextView st = text(t, 34, W.EDGE, W.DOT);
         st.setShadowLayer(W.dp(this, 10), 0, 0, 0xCCE8873A);
         st.setRotation(-6);
@@ -1865,7 +1936,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
         }}, 900);
     }
 
-    private void buzz(int ms) {
+    void buzz(int ms) {
         if (!haptics) return;
         try { Vibrator v = (Vibrator) getSystemService(VIBRATOR_SERVICE); if (v != null) v.vibrate(ms); } catch (Exception ignored) {}
     }
