@@ -1,6 +1,6 @@
 # AURELIUS7
 
-One-tap 3D wigglegram camera for Android, inspired by the K4MERA 4-lens stereo camera,
+One-tap 3D wigglegram camera for Android.
 done in software: tap once, slide the phone, get a looping 3D GIF / MP4.
 
 ## How it works
